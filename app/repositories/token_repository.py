@@ -36,18 +36,24 @@ class TokenRepository:
 
         return await self.session.scalar(stmt)
 
+    async def get_by_payment_id(self, payment_id: str) -> AccessToken | None:
+        stmt = select(AccessToken).where(AccessToken.payment_id == payment_id)
+        return await self.session.scalar(stmt)
+
     async def create(
         self,
         token_hash: str,
         token_preview: str,
         created_by_tg_id: int,
-        course_id: str = "default",
+        course_id: str,
+        payment_id: str | None = None,
     ) -> AccessToken:
         token = AccessToken(
             token_hash=token_hash,
             token_preview=token_preview,
             created_by_tg_id=created_by_tg_id,
             course_id=course_id,
+            payment_id=payment_id,
         )
 
         self.session.add(token)
