@@ -4,7 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 
 from app.config import settings
-from app.database.session import create_tables, engine, session_maker
+from app.database.session import engine, session_maker
 from app.handlers import routers
 from app.middlewares.db import DbMiddleware
 
@@ -14,8 +14,6 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
-
-    await create_tables()
 
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher()
