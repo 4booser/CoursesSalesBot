@@ -3,10 +3,21 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
 from app.config import settings
-from app.services.token_service import TokenAlreadyExistsError, TokenService
+from app.services.token_service import CoursesNotFoundError, TokenAlreadyExistsError, TokenService
 
 
 router = Router(name=__name__)
+
+
+def parse_course_ids(raw_args: str | None) -> list[str]:
+    if not raw_args:
+        return ["default"]
+
+    return [course_id.strip() for course_id in raw_args.replace(",", " ").split() if course_id.strip()]
+
+
+def format_course_ids(course_ids: list[str]) -> str:
+    return "\n".join(f"{index}. {course_id}" for index, course_id in enumerate(course_ids, start=1))
 
 
 @router.message(Command("token"))
@@ -25,15 +36,18 @@ async def create_token_handler(
         await message.answer("Нет доступа.")
         return
 
-    course_id = command.args.strip() if command.args else "default"
+    course_ids = parse_course_ids(command.args)
 
     try:
         created_token = await token_service.create_token(
             created_by_tg_id=telegram_id,
-            course_id=course_id,
+            course_ids=course_ids,
         )
     except ValueError:
-        await message.answer("Укажи корректный course_id: /token python-backend")
+        await message.answer("Укажи корректные course_id: /token python-backend csharp-aspnet")
+        return
+    except CoursesNotFoundError as error:
+        await message.answer(f"Курсы не найдены или выключены: {', '.join(error.course_ids)}")
         return
     except TokenAlreadyExistsError:
         await message.answer("Токен для этого платежа уже существует.")
@@ -41,13 +55,11 @@ async def create_token_handler(
 
     await message.answer(
         "Токен создан.\n\n"
-        f"Курс: <code>{created_token.course_id}</code>\n"
-        f"Токен: <code>{created_token.raw_token}</code>\n\n"
-        "Сохрани его сейчас. В базе хранится только hash, "
-        "сырой токен потом восстановить нельзя.\n\n"
-        f"ID: <code>{created_token.token_id}</code>\n"
-        f"Preview: <code>{created_token.token_preview}</code>",
-        parse_mode="HTML",
+        f"Курсы:\n{format_course_ids(created_token.course_ids)}\n\n"
+        f"Токен: {created_token.raw_token}\n\n"
+        "Сохрани его сейчас. В базе хранится только hash, сырой токен потом восстановить нельзя.\n\n"
+        f"ID: {created_token.token_id}\n"
+        f"Preview: {created_token.token_preview}"
     )
 
 
@@ -68,17 +80,10 @@ async def start_with_token_handler(
     )
 
     if activated_token is None:
-        await message.answer(
-            "Токен не найден или уже был использован. "
-            "Проверь, что ссылка скопирована полностью."
-        )
+        await message.answer("Токен не найден или уже был использован. Проверь, что ссылка скопирована полностью.")
         return
 
-    await message.answer(
-        "Доступ активирован.\n\n"
-        f"Курс: <code>{activated_token.course_id}</code>",
-        parse_mode="HTML",
-    )
+    await message.answer("Доступ активирован.\n\n" f"Курсы:\n{format_course_ids(activated_token.course_ids)}")
 
 
 @router.message(CommandStart())
@@ -117,11 +122,7 @@ async def activate_token_handler(
         await message.answer("Токен не найден или уже был использован.")
         return
 
-    await message.answer(
-        "Доступ активирован.\n\n"
-        f"Курс: <code>{activated_token.course_id}</code>",
-        parse_mode="HTML",
-    )
+    await message.answer("Доступ активирован.\n\n" f"Курсы:\n{format_course_ids(activated_token.course_ids)}")
 
 
 @router.message(Command("mycourses"))
@@ -139,15 +140,7 @@ async def my_courses_handler(
         await message.answer("У тебя пока нет активированных курсов.")
         return
 
-    courses_text = "\n".join(
-        f"{index}. <code>{course_id}</code>"
-        for index, course_id in enumerate(courses, start=1)
-    )
-
-    await message.answer(
-        "Твои курсы:\n\n" + courses_text,
-        parse_mode="HTML",
-    )
+    await message.answer("Твои курсы:\n\n" + format_course_ids(courses))
 
 
 @router.message(Command("help"))
