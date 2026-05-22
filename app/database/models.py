@@ -59,3 +59,29 @@ class AccessToken(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+
+
+class UserCourseAccess(Base):
+    __tablename__ = "user_course_accesses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    telegram_id: Mapped[int] = mapped_column(
+        BigInteger,
+        index=True,
+        nullable=False,
+    )
+
+    course_id: Mapped[str] = mapped_column(
+        String(64),
+        index=True,
+        nullable=False,
+    )
+
+    token_id: Mapped[int] = mapped_column(nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
