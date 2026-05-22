@@ -25,6 +25,12 @@ class AccessToken(Base):
         nullable=False,
     )
 
+    course_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="default",
+    )
+
     created_by_tg_id: Mapped[int] = mapped_column(
         BigInteger,
         index=True,
@@ -35,6 +41,12 @@ class AccessToken(Base):
         Boolean,
         nullable=False,
         server_default=text("false"),
+    )
+
+    used_by_tg_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        index=True,
+        nullable=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
