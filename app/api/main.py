@@ -1,10 +1,10 @@
 from contextlib import asynccontextmanager
-from time import monotonic
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.limiter import RedisRateLimiter
 from app.config import settings
 from app.database.session import engine, session_maker
 from app.repositories.access_repository import AccessRepository
@@ -77,33 +77,17 @@ class CourseResponse(BaseModel):
     is_active: bool
 
 
-class RateLimiter:
-    def __init__(self, limit: int = 60, window_seconds: int = 60):
-        self.limit = limit
-        self.window_seconds = window_seconds
-        self._hits: dict[str, list[float]] = {}
-
-    def check(self, key: str) -> None:
-        now = monotonic()
-        window_start = now - self.window_seconds
-        hits = [hit for hit in self._hits.get(key, []) if hit >= window_start]
-
-        if len(hits) >= self.limit:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many requests",
-            )
-
-        hits.append(now)
-        self._hits[key] = hits
-
-
-rate_limiter = RateLimiter()
+rate_limiter = RedisRateLimiter(
+    redis_url=settings.REDIS_URL,
+    limit=settings.RATE_LIMIT_REQUESTS,
+    window_seconds=settings.RATE_LIMIT_WINDOW_SECONDS,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
+    await rate_limiter.close()
     await engine.dispose()
 
 
@@ -119,7 +103,7 @@ async def rate_limit_middleware(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         api_key = request.headers.get("x-api-key")
         client_host = request.client.host if request.client else "unknown"
-        rate_limiter.check(api_key or client_host)
+        await rate_limiter.check(api_key or client_host)
 
     return await call_next(request)
 
@@ -181,15 +165,8 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post(
-    "/api/courses",
-    response_model=CourseResponse,
-    dependencies=[Depends(authorize_site)],
-)
-async def upsert_course(
-    request: UpsertCourseRequest,
-    session: AsyncSession = Depends(get_session),
-) -> CourseResponse:
+@app.post("/api/courses", response_model=CourseResponse, dependencies=[Depends(authorize_site)])
+async def upsert_course(request: UpsertCourseRequest, session: AsyncSession = Depends(get_session)) -> CourseResponse:
     course_repository = CourseRepository(session)
     course = await course_repository.upsert(
         course_id=request.id.strip(),
@@ -201,47 +178,24 @@ async def upsert_course(
     return to_course_response(course)
 
 
-@app.get(
-    "/api/courses",
-    response_model=list[CourseResponse],
-    dependencies=[Depends(authorize_site)],
-)
-async def list_courses(
-    session: AsyncSession = Depends(get_session),
-) -> list[CourseResponse]:
+@app.get("/api/courses", response_model=list[CourseResponse], dependencies=[Depends(authorize_site)])
+async def list_courses(session: AsyncSession = Depends(get_session)) -> list[CourseResponse]:
     course_repository = CourseRepository(session)
     courses = await course_repository.list_active()
     return [to_course_response(course) for course in courses]
 
 
-@app.get(
-    "/api/courses/{course_id}",
-    response_model=CourseResponse,
-    dependencies=[Depends(authorize_site)],
-)
-async def get_course(
-    course_id: str,
-    session: AsyncSession = Depends(get_session),
-) -> CourseResponse:
+@app.get("/api/courses/{course_id}", response_model=CourseResponse, dependencies=[Depends(authorize_site)])
+async def get_course(course_id: str, session: AsyncSession = Depends(get_session)) -> CourseResponse:
     course_repository = CourseRepository(session)
     course = await course_repository.get_by_id(course_id.strip())
     if course is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Course not found",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
     return to_course_response(course)
 
 
-@app.post(
-    "/api/tokens",
-    response_model=CreateTokenResponse,
-    dependencies=[Depends(authorize_site)],
-)
-async def create_token(
-    request: CreateTokenRequest,
-    session: AsyncSession = Depends(get_session),
-) -> CreateTokenResponse:
+@app.post("/api/tokens", response_model=CreateTokenResponse, dependencies=[Depends(authorize_site)])
+async def create_token(request: CreateTokenRequest, session: AsyncSession = Depends(get_session)) -> CreateTokenResponse:
     service = build_token_service(session)
 
     try:
@@ -251,15 +205,9 @@ async def create_token(
             payment_id=request.payment_id,
         )
     except TokenAlreadyExistsError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(error),
-        ) from error
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except CoursesNotFoundError as error:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(error),
-        ) from error
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
 
     return CreateTokenResponse(
         token=created_token.raw_token,
@@ -270,34 +218,18 @@ async def create_token(
     )
 
 
-@app.get(
-    "/api/access/check",
-    response_model=AccessCheckResponse,
-    dependencies=[Depends(authorize_site)],
-)
+@app.get("/api/access/check", response_model=AccessCheckResponse, dependencies=[Depends(authorize_site)])
 async def check_access(
     telegram_id: int = Query(gt=0),
     course_id: str = Query(min_length=1, max_length=64),
     session: AsyncSession = Depends(get_session),
 ) -> AccessCheckResponse:
     service = build_token_service(session)
-    has_access = await service.has_access(
-        telegram_id=telegram_id,
-        course_id=course_id,
-    )
-
-    return AccessCheckResponse(
-        has_access=has_access,
-        telegram_id=telegram_id,
-        course_id=course_id.strip(),
-    )
+    has_access = await service.has_access(telegram_id=telegram_id, course_id=course_id)
+    return AccessCheckResponse(has_access=has_access, telegram_id=telegram_id, course_id=course_id.strip())
 
 
-@app.post(
-    "/api/access/check",
-    response_model=BulkAccessCheckResponse,
-    dependencies=[Depends(authorize_site)],
-)
+@app.post("/api/access/check", response_model=BulkAccessCheckResponse, dependencies=[Depends(authorize_site)])
 async def check_bulk_access(
     request: BulkAccessCheckRequest,
     session: AsyncSession = Depends(get_session),
@@ -306,12 +238,6 @@ async def check_bulk_access(
     access: dict[str, bool] = {}
 
     for course_id in request.course_ids:
-        access[course_id] = await service.has_access(
-            telegram_id=request.telegram_id,
-            course_id=course_id,
-        )
+        access[course_id] = await service.has_access(telegram_id=request.telegram_id, course_id=course_id)
 
-    return BulkAccessCheckResponse(
-        telegram_id=request.telegram_id,
-        access=access,
-    )
+    return BulkAccessCheckResponse(telegram_id=request.telegram_id, access=access)
