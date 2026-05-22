@@ -2,6 +2,7 @@ aiogram
 sqlalchemy[asyncio]
 asyncpg
 psycopg[binary]
+psycopg2-binary
 pydantic-settings
 alembic
 fastapi
