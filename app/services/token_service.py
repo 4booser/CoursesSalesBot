@@ -5,8 +5,17 @@ from secrets import token_urlsafe
 
 from app.repositories.access_repository import AccessRepository
 from app.repositories.course_repository import CourseRepository
+from app.repositories.payment_event_repository import PaymentEventRepository
 from app.repositories.token_course_repository import TokenCourseRepository
 from app.repositories.token_repository import TokenRepository
+
+
+@dataclass(frozen=True)
+class CourseInfo:
+    id: str
+    title: str
+    description: str | None
+    invite_link: str | None
 
 
 @dataclass(frozen=True)
@@ -14,15 +23,23 @@ class CreatedToken:
     token_id: int
     raw_token: str
     token_preview: str
-    course_ids: list[str]
+    courses: list[CourseInfo]
     payment_id: str | None
+
+    @property
+    def course_ids(self) -> list[str]:
+        return [course.id for course in self.courses]
 
 
 @dataclass(frozen=True)
 class ActivatedAccess:
     telegram_id: int
-    course_ids: list[str]
+    courses: list[CourseInfo]
     token_id: int
+
+    @property
+    def course_ids(self) -> list[str]:
+        return [course.id for course in self.courses]
 
 
 class TokenAlreadyExistsError(Exception):
@@ -44,11 +61,13 @@ class TokenService:
         access_repository: AccessRepository,
         token_course_repository: TokenCourseRepository,
         course_repository: CourseRepository,
+        payment_event_repository: PaymentEventRepository | None = None,
     ):
         self.token_repository = token_repository
         self.access_repository = access_repository
         self.token_course_repository = token_course_repository
         self.course_repository = course_repository
+        self.payment_event_repository = payment_event_repository
 
     async def create_token(
         self,
@@ -64,6 +83,13 @@ class TokenService:
                 normalized_payment_id
             )
             if existing_token is not None:
+                await self.log_event(
+                    event_type="token_create",
+                    status="duplicate_payment",
+                    payment_id=normalized_payment_id,
+                    course_ids=normalized_course_ids,
+                    message="Token for this payment_id already exists",
+                )
                 raise TokenAlreadyExistsError(
                     "Token for this payment_id already exists"
                 )
@@ -78,7 +104,17 @@ class TokenService:
             if course_id not in active_course_ids
         ]
         if missing_course_ids:
+            await self.log_event(
+                event_type="token_create",
+                status="courses_not_found",
+                payment_id=normalized_payment_id,
+                course_ids=normalized_course_ids,
+                message=f"Missing courses: {', '.join(missing_course_ids)}",
+            )
             raise CoursesNotFoundError(missing_course_ids)
+
+        courses_by_id = {course.id: self.to_course_info(course) for course in active_courses}
+        ordered_courses = [courses_by_id[course_id] for course_id in normalized_course_ids]
 
         for _ in range(5):
             raw_token = token_urlsafe(self.TOKEN_BYTES)
@@ -99,12 +135,19 @@ class TokenService:
                 token_id=token.id,
                 course_ids=normalized_course_ids,
             )
+            await self.log_event(
+                event_type="token_create",
+                status="success",
+                payment_id=normalized_payment_id,
+                course_ids=normalized_course_ids,
+                token_id=token.id,
+            )
 
             return CreatedToken(
                 token_id=token.id,
                 raw_token=raw_token,
                 token_preview=token_preview,
-                course_ids=normalized_course_ids,
+                courses=ordered_courses,
                 payment_id=token.payment_id,
             )
 
@@ -131,25 +174,40 @@ class TokenService:
         if not course_ids:
             course_ids = [token.course_id]
 
+        courses = await self.course_repository.get_many_by_ids(course_ids)
+        courses_by_id = {course.id: self.to_course_info(course) for course in courses}
+        ordered_courses = [courses_by_id[course_id] for course_id in course_ids if course_id in courses_by_id]
+
         token.is_used = True
         token.used_by_tg_id = used_by_tg_id
         token.used_at = datetime.now(UTC)
 
-        accesses = await self.access_repository.create_many_missing(
+        await self.access_repository.create_many_missing(
             telegram_id=used_by_tg_id,
             course_ids=course_ids,
+            token_id=token.id,
+        )
+        await self.log_event(
+            event_type="token_activate",
+            status="success",
+            payment_id=token.payment_id,
+            course_ids=course_ids,
+            telegram_id=used_by_tg_id,
             token_id=token.id,
         )
 
         return ActivatedAccess(
             telegram_id=used_by_tg_id,
-            course_ids=[access.course_id for access in accesses],
+            courses=ordered_courses,
             token_id=token.id,
         )
 
-    async def get_user_courses(self, telegram_id: int) -> list[str]:
+    async def get_user_courses(self, telegram_id: int) -> list[CourseInfo]:
         accesses = await self.access_repository.get_user_courses(telegram_id)
-        return [access.course_id for access in accesses]
+        course_ids = [access.course_id for access in accesses]
+        courses = await self.course_repository.get_many_by_ids(course_ids)
+        courses_by_id = {course.id: self.to_course_info(course) for course in courses}
+        return [courses_by_id[course_id] for course_id in course_ids if course_id in courses_by_id]
 
     async def has_access(self, telegram_id: int, course_id: str) -> bool:
         normalized_course_id = self.normalize_course_id(course_id)
@@ -159,6 +217,29 @@ class TokenService:
         )
         return access is not None
 
+    async def log_event(
+        self,
+        event_type: str,
+        status: str,
+        payment_id: str | None = None,
+        course_ids: list[str] | None = None,
+        telegram_id: int | None = None,
+        token_id: int | None = None,
+        message: str | None = None,
+    ) -> None:
+        if self.payment_event_repository is None:
+            return
+
+        await self.payment_event_repository.create(
+            event_type=event_type,
+            status=status,
+            payment_id=payment_id,
+            course_ids=course_ids,
+            telegram_id=telegram_id,
+            token_id=token_id,
+            message=message,
+        )
+
     @staticmethod
     def hash_token(token: str) -> str:
         return sha256(token.encode("utf-8")).hexdigest()
@@ -166,6 +247,15 @@ class TokenService:
     @staticmethod
     def make_preview(token: str) -> str:
         return f"{token[:6]}...{token[-4:]}"
+
+    @staticmethod
+    def to_course_info(course) -> CourseInfo:
+        return CourseInfo(
+            id=course.id,
+            title=course.title,
+            description=course.description,
+            invite_link=course.invite_link,
+        )
 
     @staticmethod
     def normalize_course_id(course_id: str) -> str:
