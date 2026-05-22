@@ -24,6 +24,18 @@ class TokenRepository:
 
         return await self.session.scalar(stmt)
 
+    async def get_by_hash_for_update(
+        self,
+        token_hash: str,
+    ) -> AccessToken | None:
+        stmt = (
+            select(AccessToken)
+            .where(AccessToken.token_hash == token_hash)
+            .with_for_update()
+        )
+
+        return await self.session.scalar(stmt)
+
     async def create(
         self,
         token_hash: str,
