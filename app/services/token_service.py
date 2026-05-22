@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+from datetime import datetime, UTC
 from hashlib import sha256
 from secrets import token_urlsafe
 
+from app.repositories.access_repository import AccessRepository
 from app.repositories.token_repository import TokenRepository
 
 
@@ -13,11 +15,23 @@ class CreatedToken:
     course_id: str
 
 
+@dataclass(frozen=True)
+class ActivatedAccess:
+    telegram_id: int
+    course_id: str
+    token_id: int
+
+
 class TokenService:
     TOKEN_BYTES = 32
 
-    def __init__(self, token_repository: TokenRepository):
+    def __init__(
+        self,
+        token_repository: TokenRepository,
+        access_repository: AccessRepository,
+    ):
         self.token_repository = token_repository
+        self.access_repository = access_repository
 
     async def create_token(
         self,
@@ -46,14 +60,47 @@ class TokenService:
             )
         raise RuntimeError("Failed to generate unique token")
 
-    async def activate_token(self, raw_token: str, used_by_tg_id: int):
-        token_hash = self.hash_token(raw_token.strip())
-        token = await self.token_repository.get_by_hash(token_hash)
+    async def activate_token(
+        self,
+        raw_token: str,
+        used_by_tg_id: int,
+    ) -> ActivatedAccess | None:
+        cleaned_token = raw_token.strip()
+        if not cleaned_token:
+            return None
+
+        token_hash = self.hash_token(cleaned_token)
+        token = await self.token_repository.get_by_hash_for_update(token_hash)
+
         if token is None or token.is_used:
             return None
+
+        existing_access = await self.access_repository.get_by_user_and_course(
+            telegram_id=used_by_tg_id,
+            course_id=token.course_id,
+        )
+        if existing_access is not None:
+            return ActivatedAccess(
+                telegram_id=existing_access.telegram_id,
+                course_id=existing_access.course_id,
+                token_id=existing_access.token_id,
+            )
+
         token.is_used = True
         token.used_by_tg_id = used_by_tg_id
-        return token
+        token.used_at = datetime.now(UTC)
+
+        access = await self.access_repository.create(
+            telegram_id=used_by_tg_id,
+            course_id=token.course_id,
+            token_id=token.id,
+        )
+
+        return ActivatedAccess(
+            telegram_id=access.telegram_id,
+            course_id=access.course_id,
+            token_id=token.id,
+        )
 
     @staticmethod
     def hash_token(token: str) -> str:
