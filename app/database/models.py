@@ -15,6 +15,7 @@ class Course(Base):
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     invite_link: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -39,7 +40,6 @@ class AccessToken(Base):
     )
     token_preview: Mapped[str] = mapped_column(String(16), nullable=False)
 
-    # Primary course for backward compatibility. Full multi-course list is stored in token_courses.
     course_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
 
     payment_id: Mapped[str | None] = mapped_column(
