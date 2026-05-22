@@ -3,7 +3,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 
-from config import settings
+from app.config import settings
 from app.database.session import create_tables, engine, session_maker
 from app.handlers import routers
 from app.middlewares.db import DbMiddleware
