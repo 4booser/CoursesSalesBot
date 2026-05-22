@@ -1,0 +1,34 @@
+services:
+  bot:
+    build: .
+    container_name: aiogram_bot
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: python -m app.main
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: aiogram_postgres
+    environment:
+      POSTGRES_DB: bot_db
+      POSTGRES_USER: bot_user
+      POSTGRES_PASSWORD: bot_password
+    ports:
+      - "9999:8888"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bot_user -d bot_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
