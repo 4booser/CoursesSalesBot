@@ -7,5 +7,6 @@ pydantic-settings
 alembic
 fastapi
 uvicorn[standard]
+redis
 pytest
 httpx
