@@ -5,6 +5,8 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
     DATABASE_URL: str
     ADMIN_IDS: str = ""
+    SITE_API_KEY: str = ""
+    BOT_USERNAME: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
