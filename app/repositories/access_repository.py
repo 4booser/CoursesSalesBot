@@ -20,6 +20,19 @@ class AccessRepository:
 
         return await self.session.scalar(stmt)
 
+    async def get_user_courses(
+        self,
+        telegram_id: int,
+    ) -> list[UserCourseAccess]:
+        stmt = (
+            select(UserCourseAccess)
+            .where(UserCourseAccess.telegram_id == telegram_id)
+            .order_by(UserCourseAccess.created_at.desc())
+        )
+
+        result = await self.session.scalars(stmt)
+        return list(result.all())
+
     async def create(
         self,
         telegram_id: int,
