@@ -31,15 +31,15 @@ services:
     image: postgres:16-alpine
     container_name: aiogram_postgres
     environment:
-      POSTGRES_DB: bot_db
-      POSTGRES_USER: bot_user
-      POSTGRES_PASSWORD: bot_password
+      POSTGRES_DB: UsersDb
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: 67584738567
     ports:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bot_user -d bot_db"]
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432"]
       interval: 5s
       timeout: 5s
       retries: 5
