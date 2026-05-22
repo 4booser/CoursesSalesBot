@@ -1,7 +1,10 @@
 aiogram
 sqlalchemy[asyncio]
 asyncpg
+psycopg[binary]
 pydantic-settings
 alembic
 fastapi
 uvicorn[standard]
+pytest
+httpx
