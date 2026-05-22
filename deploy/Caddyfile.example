@@ -1,0 +1,6 @@
+# Replace api.example.com with your real API domain.
+# Caddy automatically obtains and renews HTTPS certificates.
+
+api.example.com {
+    reverse_proxy courses_api:8000
+}
