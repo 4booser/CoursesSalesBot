@@ -12,28 +12,19 @@ class TokenRepository:
         stmt = select(AccessToken.id).where(
             AccessToken.token_hash == token_hash
         )
-
         token_id = await self.session.scalar(stmt)
-
         return token_id is not None
 
     async def get_by_hash(self, token_hash: str) -> AccessToken | None:
-        stmt = select(AccessToken).where(
-            AccessToken.token_hash == token_hash
-        )
-
+        stmt = select(AccessToken).where(AccessToken.token_hash == token_hash)
         return await self.session.scalar(stmt)
 
-    async def get_by_hash_for_update(
-        self,
-        token_hash: str,
-    ) -> AccessToken | None:
+    async def get_by_hash_for_update(self, token_hash: str) -> AccessToken | None:
         stmt = (
             select(AccessToken)
             .where(AccessToken.token_hash == token_hash)
             .with_for_update()
         )
-
         return await self.session.scalar(stmt)
 
     async def get_by_payment_id(self, payment_id: str) -> AccessToken | None:
@@ -55,8 +46,6 @@ class TokenRepository:
             course_id=course_id,
             payment_id=payment_id,
         )
-
         self.session.add(token)
         await self.session.flush()
-
         return token
