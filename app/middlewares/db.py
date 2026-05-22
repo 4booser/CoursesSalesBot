@@ -6,16 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.repositories.access_repository import AccessRepository
 from app.repositories.course_repository import CourseRepository
+from app.repositories.payment_event_repository import PaymentEventRepository
 from app.repositories.token_course_repository import TokenCourseRepository
 from app.repositories.token_repository import TokenRepository
 from app.services.token_service import TokenService
 
 
 class DbMiddleware(BaseMiddleware):
-    def __init__(
-        self,
-        session_maker: async_sessionmaker[AsyncSession],
-    ):
+    def __init__(self, session_maker: async_sessionmaker[AsyncSession]):
         self.session_maker = session_maker
 
     async def __call__(
@@ -30,6 +28,7 @@ class DbMiddleware(BaseMiddleware):
                 access_repository=AccessRepository(session),
                 token_course_repository=TokenCourseRepository(session),
                 course_repository=CourseRepository(session),
+                payment_event_repository=PaymentEventRepository(session),
             )
 
             data["session"] = session
@@ -39,7 +38,6 @@ class DbMiddleware(BaseMiddleware):
                 result = await handler(event, data)
                 await session.commit()
                 return result
-
             except Exception:
                 await session.rollback()
                 raise
