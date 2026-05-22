@@ -1,14 +1,29 @@
 services:
+  migrate:
+    build: ..
+    env_file:
+      - ../.env
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build: ..
     env_file:
       - ../.env
     command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   bot:
@@ -17,14 +32,33 @@ services:
       - ../.env
     command: python -m app.main
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
-        condition: service_started
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      api:
+        condition: service_healthy
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
 
   postgres:
@@ -42,3 +76,5 @@ services:
 
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

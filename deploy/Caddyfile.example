@@ -1,6 +1,15 @@
 # Replace api.example.com with your real API domain.
-# Caddy automatically obtains and renews HTTPS certificates.
+# 192.168.0.194 is a temporary allowlist IP.
+# For a VPS/server, replace it with the public IP of your friend's backend server.
 
 api.example.com {
-    reverse_proxy courses_api:8000
+    @allowed remote_ip 192.168.0.194
+
+    handle @allowed {
+        reverse_proxy api:8000
+    }
+
+    handle {
+        respond "Forbidden" 403
+    }
 }

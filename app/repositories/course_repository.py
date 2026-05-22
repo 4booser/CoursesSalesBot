@@ -41,6 +41,7 @@ class CourseRepository:
         title: str,
         description: str | None = None,
         invite_link: str | None = None,
+        telegram_chat_id: int | None = None,
         is_active: bool = True,
     ) -> Course:
         course = await self.get_by_id(course_id)
@@ -51,6 +52,7 @@ class CourseRepository:
                 title=title,
                 description=description,
                 invite_link=invite_link,
+                telegram_chat_id=telegram_chat_id,
                 is_active=is_active,
             )
             self.session.add(course)
@@ -58,6 +60,7 @@ class CourseRepository:
             course.title = title
             course.description = description
             course.invite_link = invite_link
+            course.telegram_chat_id = telegram_chat_id
             course.is_active = is_active
 
         await self.session.flush()

@@ -16,6 +16,7 @@ class CourseInfo:
     title: str
     description: str | None
     invite_link: str | None
+    telegram_chat_id: int | None
 
 
 @dataclass(frozen=True)
@@ -255,6 +256,7 @@ class TokenService:
             title=course.title,
             description=course.description,
             invite_link=course.invite_link,
+            telegram_chat_id=course.telegram_chat_id,
         )
 
     @staticmethod
