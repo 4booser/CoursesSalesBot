@@ -5,6 +5,8 @@ from aiogram.types import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.repositories.access_repository import AccessRepository
+from app.repositories.course_repository import CourseRepository
+from app.repositories.token_course_repository import TokenCourseRepository
 from app.repositories.token_repository import TokenRepository
 from app.services.token_service import TokenService
 
@@ -23,11 +25,11 @@ class DbMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         async with self.session_maker() as session:
-            token_repository = TokenRepository(session)
-            access_repository = AccessRepository(session)
             token_service = TokenService(
-                token_repository=token_repository,
-                access_repository=access_repository,
+                token_repository=TokenRepository(session),
+                access_repository=AccessRepository(session),
+                token_course_repository=TokenCourseRepository(session),
+                course_repository=CourseRepository(session),
             )
 
             data["session"] = session
