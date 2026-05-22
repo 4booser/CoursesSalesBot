@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     POSTGRES_USER: str = "bot_user"
     POSTGRES_PASSWORD: str = "bot_password"
 
+    REDIS_URL: str = "redis://localhost:6379/0"
+    RATE_LIMIT_REQUESTS: int = 60
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
