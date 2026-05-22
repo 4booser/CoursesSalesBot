@@ -3,7 +3,12 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
 from app.config import settings
-from app.services.token_service import CoursesNotFoundError, TokenAlreadyExistsError, TokenService
+from app.services.token_service import (
+    CourseInfo,
+    CoursesNotFoundError,
+    TokenAlreadyExistsError,
+    TokenService,
+)
 
 
 router = Router(name=__name__)
@@ -13,11 +18,31 @@ def parse_course_ids(raw_args: str | None) -> list[str]:
     if not raw_args:
         return ["default"]
 
-    return [course_id.strip() for course_id in raw_args.replace(",", " ").split() if course_id.strip()]
+    return [
+        course_id.strip()
+        for course_id in raw_args.replace(",", " ").split()
+        if course_id.strip()
+    ]
+
+
+def format_courses(courses: list[CourseInfo]) -> str:
+    lines: list[str] = []
+
+    for index, course in enumerate(courses, start=1):
+        title = course.title or course.id
+        line = f"{index}. {title} ({course.id})"
+        if course.invite_link:
+            line += f"\n   Материалы: {course.invite_link}"
+        lines.append(line)
+
+    return "\n\n".join(lines)
 
 
 def format_course_ids(course_ids: list[str]) -> str:
-    return "\n".join(f"{index}. {course_id}" for index, course_id in enumerate(course_ids, start=1))
+    return "\n".join(
+        f"{index}. {course_id}"
+        for index, course_id in enumerate(course_ids, start=1)
+    )
 
 
 @router.message(Command("token"))
@@ -55,7 +80,7 @@ async def create_token_handler(
 
     await message.answer(
         "Токен создан.\n\n"
-        f"Курсы:\n{format_course_ids(created_token.course_ids)}\n\n"
+        f"Курсы:\n{format_courses(created_token.courses)}\n\n"
         f"Токен: {created_token.raw_token}\n\n"
         "Сохрани его сейчас. В базе хранится только hash, сырой токен потом восстановить нельзя.\n\n"
         f"ID: {created_token.token_id}\n"
@@ -83,7 +108,10 @@ async def start_with_token_handler(
         await message.answer("Токен не найден или уже был использован. Проверь, что ссылка скопирована полностью.")
         return
 
-    await message.answer("Доступ активирован.\n\n" f"Курсы:\n{format_course_ids(activated_token.course_ids)}")
+    await message.answer(
+        "Доступ активирован.\n\n"
+        f"Курсы:\n{format_courses(activated_token.courses)}"
+    )
 
 
 @router.message(CommandStart())
@@ -122,7 +150,10 @@ async def activate_token_handler(
         await message.answer("Токен не найден или уже был использован.")
         return
 
-    await message.answer("Доступ активирован.\n\n" f"Курсы:\n{format_course_ids(activated_token.course_ids)}")
+    await message.answer(
+        "Доступ активирован.\n\n"
+        f"Курсы:\n{format_courses(activated_token.courses)}"
+    )
 
 
 @router.message(Command("mycourses"))
@@ -140,7 +171,7 @@ async def my_courses_handler(
         await message.answer("У тебя пока нет активированных курсов.")
         return
 
-    await message.answer("Твои курсы:\n\n" + format_course_ids(courses))
+    await message.answer("Твои курсы:\n\n" + format_courses(courses))
 
 
 @router.message(Command("help"))
