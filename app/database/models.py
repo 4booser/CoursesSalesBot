@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, String, func, text
+from sqlalchemy import BigInteger, Boolean, DateTime, String, UniqueConstraint, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -27,14 +27,22 @@ class AccessToken(Base):
 
     course_id: Mapped[str] = mapped_column(
         String(64),
+        index=True,
         nullable=False,
-        default="default",
+    )
+
+    payment_id: Mapped[str | None] = mapped_column(
+        String(128),
+        unique=True,
+        index=True,
+        nullable=True,
     )
 
     created_by_tg_id: Mapped[int] = mapped_column(
         BigInteger,
         index=True,
         nullable=False,
+        default=0,
     )
 
     is_used: Mapped[bool] = mapped_column(
@@ -63,6 +71,9 @@ class AccessToken(Base):
 
 class UserCourseAccess(Base):
     __tablename__ = "user_course_accesses"
+    __table_args__ = (
+        UniqueConstraint("telegram_id", "course_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
