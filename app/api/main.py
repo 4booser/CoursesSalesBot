@@ -9,6 +9,7 @@ from app.config import settings
 from app.database.session import engine, session_maker
 from app.repositories.access_repository import AccessRepository
 from app.repositories.course_repository import CourseRepository
+from app.repositories.payment_event_repository import PaymentEventRepository
 from app.repositories.token_course_repository import TokenCourseRepository
 from app.repositories.token_repository import TokenRepository
 from app.services.token_service import (
@@ -48,6 +49,16 @@ class AccessCheckResponse(BaseModel):
     has_access: bool
     telegram_id: int
     course_id: str
+
+
+class BulkAccessCheckRequest(BaseModel):
+    telegram_id: int = Field(gt=0)
+    course_ids: list[str] = Field(min_length=1, max_length=50)
+
+
+class BulkAccessCheckResponse(BaseModel):
+    telegram_id: int
+    access: dict[str, bool]
 
 
 class UpsertCourseRequest(BaseModel):
@@ -143,6 +154,7 @@ def build_token_service(session: AsyncSession) -> TokenService:
         access_repository=AccessRepository(session),
         token_course_repository=TokenCourseRepository(session),
         course_repository=CourseRepository(session),
+        payment_event_repository=PaymentEventRepository(session),
     )
 
 
@@ -202,6 +214,25 @@ async def list_courses(
     return [to_course_response(course) for course in courses]
 
 
+@app.get(
+    "/api/courses/{course_id}",
+    response_model=CourseResponse,
+    dependencies=[Depends(authorize_site)],
+)
+async def get_course(
+    course_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> CourseResponse:
+    course_repository = CourseRepository(session)
+    course = await course_repository.get_by_id(course_id.strip())
+    if course is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Course not found",
+        )
+    return to_course_response(course)
+
+
 @app.post(
     "/api/tokens",
     response_model=CreateTokenResponse,
@@ -259,4 +290,28 @@ async def check_access(
         has_access=has_access,
         telegram_id=telegram_id,
         course_id=course_id.strip(),
+    )
+
+
+@app.post(
+    "/api/access/check",
+    response_model=BulkAccessCheckResponse,
+    dependencies=[Depends(authorize_site)],
+)
+async def check_bulk_access(
+    request: BulkAccessCheckRequest,
+    session: AsyncSession = Depends(get_session),
+) -> BulkAccessCheckResponse:
+    service = build_token_service(session)
+    access: dict[str, bool] = {}
+
+    for course_id in request.course_ids:
+        access[course_id] = await service.has_access(
+            telegram_id=request.telegram_id,
+            course_id=course_id,
+        )
+
+    return BulkAccessCheckResponse(
+        telegram_id=request.telegram_id,
+        access=access,
     )
