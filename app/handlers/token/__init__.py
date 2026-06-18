@@ -2,7 +2,7 @@ import logging
 
 from aiogram import Bot, Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import settings
 from app.services.token_service import (
@@ -164,6 +164,16 @@ async def start_with_token_handler(
     await message.answer("Доступ активирован.\n\n" f"Курсы:\n{courses_text}")
 
 
+def build_support_keyboard() -> InlineKeyboardMarkup | None:
+    if not settings.SUPPORT_USERNAME:
+        return None
+
+    username = settings.SUPPORT_USERNAME.removeprefix("@")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Чат со мной", url=f"https://t.me/{username}")]]
+    )
+
+
 @router.message(CommandStart())
 async def start_handler(message: Message) -> None:
     await message.answer(
@@ -171,7 +181,9 @@ async def start_handler(message: Message) -> None:
         "Открой её, и я активирую доступ к курсу.\n\n"
         "Команды:\n"
         "/activate TOKEN — активировать токен вручную\n"
-        "/mycourses — посмотреть мои курсы"
+        "/mycourses — посмотреть мои курсы\n"
+        "/help — помощь и связь с администратором",
+        reply_markup=build_support_keyboard(),
     )
 
 
@@ -240,5 +252,6 @@ async def help_handler(message: Message) -> None:
         "/start — описание бота\n"
         "/activate TOKEN — активировать токен вручную\n"
         "/mycourses — посмотреть активированные курсы\n\n"
-        "После оплаты лучше открывать ссылку с сайта — токен активируется автоматически."
+        "После оплаты лучше открывать ссылку с сайта — токен активируется автоматически.",
+        reply_markup=build_support_keyboard(),
     )

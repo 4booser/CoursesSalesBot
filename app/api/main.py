@@ -66,6 +66,8 @@ class UpsertCourseRequest(BaseModel):
     title: str = Field(min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=2000)
     invite_link: str | None = Field(default=None, max_length=512)
+    thumbnail_url: str | None = Field(default=None, max_length=512)
+    youtube_url: str | None = Field(default=None, max_length=512)
     telegram_chat_id: int | None = None
     is_active: bool = True
 
@@ -75,6 +77,8 @@ class CourseResponse(BaseModel):
     title: str
     description: str | None
     invite_link: str | None
+    thumbnail_url: str | None
+    youtube_url: str | None
     telegram_chat_id: int | None
     is_active: bool
 
@@ -158,6 +162,8 @@ def to_course_response(course) -> CourseResponse:
         title=course.title,
         description=course.description,
         invite_link=course.invite_link,
+        thumbnail_url=course.thumbnail_url,
+        youtube_url=course.youtube_url,
         telegram_chat_id=course.telegram_chat_id,
         is_active=course.is_active,
     )
@@ -176,6 +182,8 @@ async def upsert_course(request: UpsertCourseRequest, session: AsyncSession = De
         title=request.title.strip(),
         description=request.description,
         invite_link=request.invite_link,
+        thumbnail_url=request.thumbnail_url,
+        youtube_url=request.youtube_url,
         telegram_chat_id=request.telegram_chat_id,
         is_active=request.is_active,
     )

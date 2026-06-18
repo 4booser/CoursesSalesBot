@@ -33,6 +33,7 @@ class DbMiddleware(BaseMiddleware):
 
             data["session"] = session
             data["token_service"] = token_service
+            data["course_repository"] = CourseRepository(session)
 
             try:
                 result = await handler(event, data)

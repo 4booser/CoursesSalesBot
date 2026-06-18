@@ -41,6 +41,8 @@ class CourseRepository:
         title: str,
         description: str | None = None,
         invite_link: str | None = None,
+        thumbnail_url: str | None = None,
+        youtube_url: str | None = None,
         telegram_chat_id: int | None = None,
         is_active: bool = True,
     ) -> Course:
@@ -52,6 +54,8 @@ class CourseRepository:
                 title=title,
                 description=description,
                 invite_link=invite_link,
+                thumbnail_url=thumbnail_url,
+                youtube_url=youtube_url,
                 telegram_chat_id=telegram_chat_id,
                 is_active=is_active,
             )
@@ -60,6 +64,8 @@ class CourseRepository:
             course.title = title
             course.description = description
             course.invite_link = invite_link
+            course.thumbnail_url = thumbnail_url
+            course.youtube_url = youtube_url
             course.telegram_chat_id = telegram_chat_id
             course.is_active = is_active
 
