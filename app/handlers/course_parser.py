@@ -17,8 +17,8 @@ router = Router(name=__name__)
 logger = logging.getLogger(__name__)
 
 
-@router.message(Command("import_youtube_course"))
-async def import_youtube_course_command(message: Message, course_repository: CourseRepository) -> None:
+@router.message(Command("add_course"))
+async def add_course_command(message: Message, course_repository: CourseRepository) -> None:
     if message.from_user is None or message.from_user.id not in settings.admin_ids:
         await message.answer("Нет доступа.")
         return
@@ -45,7 +45,7 @@ async def import_youtube_course(message: Message, course_repository: CourseRepos
     try:
         parsed = await parser.parse(text)
     except YoutubeLinkNotFoundError:
-        await message.answer("Не нашёл YouTube-ссылку. Пришли ссылку на видео или /import_youtube_course <ссылка>.")
+        await message.answer("Не нашёл YouTube-ссылку. Пришли ссылку на видео или /add_course <ссылка>.")
         return
     except YoutubeParseError as error:
         logger.warning("Failed to import YouTube course: %s", error)

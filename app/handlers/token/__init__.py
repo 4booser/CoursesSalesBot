@@ -256,6 +256,6 @@ async def help_handler(message: Message) -> None:
     )
 
     if message.from_user is not None and message.from_user.id in settings.admin_ids:
-        text += "\n\nАдмин:\n/import_youtube_course URL — импортировать курс из YouTube-ссылки"
+        text += "\n\nАдмин:\n/add_course URL — импортировать курс из YouTube-ссылки"
 
     await message.answer(text, reply_markup=build_support_keyboard())

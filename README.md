@@ -547,3 +547,21 @@ Known limitations:
 - `/mycourses` intentionally does not create new one-time invite links to prevent abuse.
 - Caddy allowlist currently contains temporary local IP `192.168.0.194`; replace it with the public IP of the website backend.
 - Backups must not be committed. `backups/` is ignored now, but remove any already committed backup files from Git history before serious production use.
+
+## Troubleshooting Telegram polling
+
+### `TelegramConflictError: terminated by other getUpdates request`
+
+Telegram allows only one active long-polling consumer per bot token. If this error appears, another bot process is already using the same `BOT_TOKEN`.
+
+How to check and fix locally:
+
+```bash
+docker ps --filter name=aiogram_bot
+sudo docker compose down --remove-orphans
+sudo docker compose up --build
+```
+
+Also check that the same bot token is not running in another terminal, on a server, or in another Docker Compose project. For parallel local/prod testing, use a separate Telegram bot token for each environment.
+
+The `/add_course URL` command imports a course from a YouTube link. Admins can also send a YouTube link as a normal message, and the bot will import it automatically.
