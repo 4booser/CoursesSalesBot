@@ -15,6 +15,8 @@ class Course(Base):
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     invite_link: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    thumbnail_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    youtube_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean,

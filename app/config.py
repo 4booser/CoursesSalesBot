@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     SITE_API_KEY: str = ""
     API_TOKEN: str = ""
     BOT_USERNAME: str = ""
+    SUPPORT_USERNAME: str = ""
+    YOUTUBE_COOKIES_FILE: str = ""
 
     POSTGRES_DB: str = "bot_db"
     POSTGRES_USER: str = "bot_user"

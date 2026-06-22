@@ -10,3 +10,4 @@ uvicorn[standard]
 redis
 pytest
 httpx
+yt-dlp
