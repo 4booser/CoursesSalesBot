@@ -1,10 +1,10 @@
-import html
-import json
+import asyncio
 import re
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
@@ -50,120 +50,74 @@ class YoutubeParseError(Exception):
     pass
 
 
+class YoutubeLinkNotFoundError(YoutubeParseError):
+    pass
+
+
 class YoutubeCourseParser:
-    def __init__(self, timeout_seconds: float = 10.0):
-        self.timeout_seconds = timeout_seconds
+    """Extracts YouTube course metadata through yt-dlp.
+
+    This works for public and unlisted videos that are available by URL. Truly private
+    videos require a valid YouTube cookies file from an account that has access.
+    """
+
+    def __init__(self, cookies_file: str | None = None):
+        self.cookies_file = cookies_file
 
     async def parse(self, text: str) -> ParsedYoutubeCourse:
         video_id = extract_youtube_video_id(text)
         if video_id is None:
-            raise YoutubeParseError("YouTube link not found")
+            raise YoutubeLinkNotFoundError("YouTube link not found")
 
         url = canonical_youtube_url(video_id)
-        async with httpx.AsyncClient(
-            timeout=self.timeout_seconds,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 CoursesSalesBot/1.0"},
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        info = await asyncio.to_thread(self._extract_info, url)
+        title = self._clean_text(info.get("title"))
+        if not title:
+            raise YoutubeParseError("YouTube title not found")
 
-        metadata = self._extract_metadata(response.text)
-        title = metadata.get("title") or f"YouTube video {video_id}"
-        description = metadata.get("description")
-        thumbnail_url = metadata.get("thumbnail_url") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+        description = self._clean_text(info.get("description"))
+        thumbnail_url = self._select_thumbnail(info)
 
         return ParsedYoutubeCourse(
             video_id=video_id,
-            url=url,
+            url=info.get("webpage_url") or url,
             title=title[:128],
             description=description[:2000] if description else None,
             thumbnail_url=thumbnail_url[:512] if thumbnail_url else None,
         )
 
-    def _extract_metadata(self, page: str) -> dict[str, str | None]:
-        player_response = self._extract_json_object(page, "ytInitialPlayerResponse")
-        video_details = player_response.get("videoDetails", {}) if player_response else {}
-        microformat = player_response.get("microformat", {}).get("playerMicroformatRenderer", {}) if player_response else {}
-
-        title = video_details.get("title") or microformat.get("title", {}).get("simpleText")
-        short_description = video_details.get("shortDescription") or microformat.get("description", {}).get("simpleText")
-        thumbnail_url = self._extract_thumbnail(video_details) or self._extract_thumbnail(microformat)
-
-        if not title:
-            title = self._extract_meta(page, "og:title") or self._extract_title(page)
-        if not short_description:
-            short_description = self._extract_meta(page, "description") or self._extract_meta(page, "og:description")
-        if not thumbnail_url:
-            thumbnail_url = self._extract_meta(page, "og:image")
-
-        return {
-            "title": self._clean_text(title),
-            "description": self._clean_text(short_description),
-            "thumbnail_url": thumbnail_url,
+    def _extract_info(self, url: str) -> dict:
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": False,
+            "noplaylist": True,
         }
+        if self.cookies_file:
+            options["cookiefile"] = self.cookies_file
 
-    def _extract_json_object(self, page: str, variable_name: str) -> dict | None:
-        marker = f"{variable_name} = "
-        start = page.find(marker)
-        if start == -1:
-            return None
+        try:
+            with YoutubeDL(options) as youtube_dl:
+                return youtube_dl.extract_info(url, download=False)
+        except DownloadError as error:
+            raise YoutubeParseError(str(error)) from error
 
-        start = page.find("{", start)
-        if start == -1:
-            return None
+    def _select_thumbnail(self, info: dict) -> str | None:
+        thumbnails = info.get("thumbnails") or []
+        if thumbnails:
+            sorted_thumbnails = sorted(
+                thumbnails,
+                key=lambda item: (item.get("width") or 0) * (item.get("height") or 0),
+            )
+            url = sorted_thumbnails[-1].get("url")
+            if url:
+                return url
 
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start, len(page)):
-            char = page[index]
-            if in_string:
-                if escape:
-                    escape = False
-                elif char == "\\":
-                    escape = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(page[start : index + 1])
-                    except json.JSONDecodeError:
-                        return None
-        return None
-
-    def _extract_meta(self, page: str, name: str) -> str | None:
-        patterns = [
-            rf'<meta[^>]+property=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']*)["\']',
-            rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']*)["\']',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, page, flags=re.IGNORECASE)
-            if match:
-                return html.unescape(match.group(1))
-        return None
-
-    def _extract_title(self, page: str) -> str | None:
-        match = re.search(r"<title>(.*?)</title>", page, flags=re.IGNORECASE | re.DOTALL)
-        if not match:
-            return None
-        return html.unescape(re.sub(r"\s+", " ", match.group(1))).replace(" - YouTube", "").strip()
-
-    def _extract_thumbnail(self, data: dict) -> str | None:
-        thumbnails = data.get("thumbnail", {}).get("thumbnails", [])
-        if not thumbnails:
-            return None
-        return thumbnails[-1].get("url")
+        return info.get("thumbnail")
 
     def _clean_text(self, value: str | None) -> str | None:
         if value is None:
             return None
-        cleaned = html.unescape(value).strip()
+        cleaned = value.strip()
         return cleaned or None

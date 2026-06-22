@@ -247,11 +247,15 @@ async def my_courses_handler(
 
 @router.message(Command("help"))
 async def help_handler(message: Message) -> None:
-    await message.answer(
+    text = (
         "Команды:\n"
         "/start — описание бота\n"
         "/activate TOKEN — активировать токен вручную\n"
         "/mycourses — посмотреть активированные курсы\n\n"
-        "После оплаты лучше открывать ссылку с сайта — токен активируется автоматически.",
-        reply_markup=build_support_keyboard(),
+        "После оплаты лучше открывать ссылку с сайта — токен активируется автоматически."
     )
+
+    if message.from_user is not None and message.from_user.id in settings.admin_ids:
+        text += "\n\nАдмин:\n/import_youtube_course URL — импортировать курс из YouTube-ссылки"
+
+    await message.answer(text, reply_markup=build_support_keyboard())
