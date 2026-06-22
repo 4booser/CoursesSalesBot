@@ -1,567 +1,432 @@
 # CoursesSalesBot
 
-Микросервис для продажи доступа к видеокурсам через Telegram.
+Telegram-бот — **витрина видеокурсов с тарифами**. Пользователь оплачивает один из трёх
+тарифов на сайте, получает персональную ссылку, открывает бота — и внутри бота смотрит
+видео, разложенные по группам и подгруппам. Что именно видно — зависит от тарифа; доступ
+выдаётся на ограниченный срок.
 
-Сайт после успешной оплаты вызывает API, API создаёт одноразовый токен, пользователь открывает Telegram-ссылку, бот активирует токен и выдаёт доступ к одному или нескольким курсам.
+Контент наполняет владелец прямо в боте: создаёт группы/подгруппы, добавляет видео, кидая
+ссылку на YouTube (название и обложку бот подтягивает сам через yt-dlp).
 
-## Архитектура
+## Концепция
 
 ```text
-Website backend
-    ↓ POST /api/tokens
-FastAPI API
-    ↓
-PostgreSQL + Redis
-    ↓ telegram_link
-Telegram Bot
-    ↓ /start TOKEN или /activate TOKEN
-User gets course access
+Сайт (после оплаты Monobank)
+    │  POST /api/tokens { payment_id, tier }     ← заголовок X-API-Key
+    ▼
+FastAPI API  ──►  создаёт одноразовый токен под тариф
+    │  возвращает telegram_link
+    ▼
+Пользователь открывает https://t.me/<bot>?start=<token>
+    ▼
+Бот активирует токен → выдаёт тариф на N дней → показывает каталог
 ```
 
-Сервисы:
+Сервисы (docker compose):
 
-- `api` — FastAPI HTTP API.
-- `bot` — aiogram Telegram bot.
+- `api` — FastAPI HTTP API (его дёргает бэкенд сайта).
+- `bot` — aiogram-бот (витрина + админка), long polling.
 - `postgres` — основная БД.
 - `redis` — rate limit для API.
-- `migrate` — production-only сервис для Alembic migrations.
-- `caddy` — production-only HTTPS reverse proxy.
+- `migrate` — прод-сервис, прогоняет `alembic upgrade head` на старте.
+- `caddy` — прод HTTPS reverse proxy.
 
-Токен — это opaque token: внутри него нет `course_id`, `telegram_id` или `payment_id`. В БД хранится только `sha256(token)`. Raw token возвращается сайту один раз.
+## Тарифы
+
+Единый источник правды — `app/tiers.py`. Тариф определяется префиксом `reference`
+с сайта (`lite-...`, `pro-...`, `vip-...`).
+
+| Тариф | Ранг | Срок доступа |
+|-------|------|--------------|
+| `lite` | 1 | 30 дней |
+| `pro`  | 2 | 30 дней |
+| `vip`  | 3 | 90 дней |
+
+**Гейтинг контента:** у каждой группы и каждого видео есть `min_tier`. Пользователь видит
+элемент, если **ранг его тарифа ≥ ранг `min_tier` элемента**. Так «разный контент по тарифам»
+делается без отдельных каталогов: общие видео ставишь `min_tier=lite`, бонусные —
+`pro`/`vip`. Срок доступа — просто проверка `expires_at` при заходе в каталог; отзывать или
+кикать никого не нужно, потому что видео живут внутри бота.
+
+## Токен
+
+Opaque-токен: внутри него нет тарифа или id. В БД хранится только `sha256(token)`, а сам
+тариф и срок (`tier`, `duration_days`) лежат в строке токена. Сырой токен возвращается сайту
+один раз. Токен одноразовый: после активации помечается `is_used`.
+
+## Модель данных
+
+| Таблица | Назначение |
+|---------|------------|
+| `access_tokens` | Одноразовые токены покупки: `token_hash`, `token_preview`, `tier`, `duration_days`, `payment_id` (уникальный — защита от дублей вебхука), `is_used`, `used_by_tg_id`, `used_at`. |
+| `content_groups` | Группы и подгруппы: `parent_id` (NULL = группа верхнего уровня, иначе подгруппа), `title`, `min_tier`, `position`, `is_active`. Каскадное удаление детей. |
+| `videos` | Видео внутри группы: `group_id`, `title`, `youtube_url`, `thumbnail_url`, `min_tier`, `position`, `is_active`. |
+| `user_tier_accesses` | Выданные доступы: `telegram_id`, `tier`, `expires_at`, `token_id`, `payment_id`. У юзера может быть несколько записей (докупки) — действует высший непросроченный тариф. |
+| `payment_event_logs` | Аудит: `event_type` (`token_create`/`token_activate`), `status` (`success`/`duplicate_payment`/…), `payment_id`, `telegram_id`, `token_id`, `message`. |
+
+> Легаси-таблицы `courses`, `token_courses`, `user_course_accesses` остались от прошлой
+> (course-based) модели и больше не используются — их можно удалить отдельной миграцией.
+
+## Структура проекта
+
+```text
+app/
+├── config.py                 # Settings (pydantic-settings): чтение .env
+├── tiers.py                  # тарифы: ранги, сроки, тайтлы, нормализация
+├── main.py                   # entrypoint бота (aiogram polling)
+├── database/
+│   ├── session.py            # async engine + session_maker
+│   └── models.py             # SQLAlchemy ORM-модели (все таблицы)
+├── middlewares/
+│   ├── db.py                 # ⭐ DI: на каждый апдейт открывает сессию,
+│   │                         #    собирает сервисы/репозитории, коммитит/роллбэчит
+│   └── auth.py               # (пусто, легаси)
+├── repositories/             # слой доступа к данным (тонкие, без бизнес-логики)
+│   ├── token_repository.py            # ⭐ access_tokens
+│   ├── tier_access_repository.py      # ⭐ user_tier_accesses
+│   ├── content_group_repository.py    # ⭐ content_groups (CRUD + позиции)
+│   ├── video_repository.py            # ⭐ videos (CRUD + позиции)
+│   ├── payment_event_repository.py    # ⭐ payment_event_logs
+│   └── *_repository.py (course/access/token_course/user) # легаси, не используются
+├── services/                 # бизнес-логика
+│   ├── token_service.py      # ⭐ создание/активация токена, расчёт доступа
+│   ├── catalog_service.py    # ⭐ выборки каталога с тир-гейтингом
+│   ├── youtube_parser.py     # ⭐ yt-dlp: вытащить title + обложку из ссылки
+│   ├── payment_service.py    # легаси
+│   └── user_service.py       # легаси
+├── handlers/                 # роутеры aiogram
+│   ├── __init__.py           # порядок роутеров
+│   ├── token/__init__.py     # ⭐ активация: /start TOKEN, /activate TOKEN
+│   ├── user_catalog.py       # ⭐ витрина: /start, /catalog, /myaccess, /help, callbacks cat:*
+│   ├── admin_panel.py        # ⭐ админка: /admin + FSM + callbacks adm:*
+│   └── course_parser.py      # легаси (отключён, мешал бы FSM)
+└── api/
+    ├── main.py               # ⭐ FastAPI приложение и все эндпоинты
+    ├── limiter.py            # ⭐ Redis fixed-window rate limiter
+    └── link_cache.py         # легаси (не подключён)
+migrations/versions/          # Alembic: 0001..0004
+```
+
+(⭐ — активный модуль текущей тарифной модели; «легаси» — наследие старой course-модели,
+не подключено, безопасно игнорировать/удалить позже.)
+
+## Функционал бэкенда по слоям
+
+### `app/config.py`
+
+`Settings` на `pydantic-settings`, читает `.env`. Поля: `BOT_TOKEN`, `BOT_USERNAME`,
+`ADMIN_IDS` (CSV → `admin_ids: set[int]`), `SITE_API_KEY`/`API_TOKEN`
+(`site_api_key` — что не пусто), `SUPPORT_USERNAME`, `YOUTUBE_COOKIES_FILE`, `DATABASE_URL`,
+`REDIS_URL`, `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS`.
+
+### `app/tiers.py`
+
+Константы тарифов и helpers: `normalize_tier`, `tier_rank`, `tier_title`,
+`duration_days_for_tier`, `ALL_TIERS`. Меняешь сроки/набор тарифов — только здесь.
+
+### `app/database/`
+
+- `session.py` — асинхронный движок SQLAlchemy + `session_maker` (`expire_on_commit=False`).
+- `models.py` — ORM-модели всех таблиц (см. «Модель данных»).
+
+### `app/middlewares/db.py` (ключевой)
+
+aiogram-мидлварь на уровне апдейта. На каждый апдейт: открывает сессию, создаёт
+`TokenService`, `CatalogService`, `ContentGroupRepository`, `VideoRepository`, кладёт их в
+`data` (откуда aiogram инъектит в хендлеры по имени аргумента), затем `commit` при успехе
+или `rollback` при исключении. FSM-состояние админки хранится в `MemoryStorage` (по умолчанию
+в `Dispatcher`).
+
+### `app/repositories/` (активные)
+
+Тонкий слой над БД, без бизнес-логики:
+
+- `TokenRepository` — `create` (с tier/duration), `get_by_hash` / `get_by_hash_for_update`
+  (SELECT FOR UPDATE при активации), `get_by_payment_id`, `exists_by_hash`.
+- `TierAccessRepository` — `create` (выдать доступ), `list_active(telegram_id, now)`
+  (непросроченные гранты).
+- `ContentGroupRepository` — `get_by_id`, `list_children(parent_id)`, `create`, `update`,
+  `delete`, `next_position`, `count_videos`.
+- `VideoRepository` — `get_by_id`, `list_by_group`, `create`, `update`, `delete`,
+  `next_position`.
+- `PaymentEventRepository` — `create` (запись в аудит-лог).
+
+### `app/services/` (активные)
+
+- **`TokenService`** — ядро доступа:
+  - `create_token(created_by_tg_id, tier, payment_id?, duration_days?)` — валидирует тариф,
+    проверяет дубль по `payment_id` (→ `TokenAlreadyExistsError`), генерит уникальный
+    `secrets.token_urlsafe(32)`, хранит `sha256`, пишет аудит. Возвращает `CreatedToken`.
+  - `activate_token(raw_token, used_by_tg_id)` — берёт токен `FOR UPDATE`, если валиден и не
+    использован — помечает `is_used`, создаёт `user_tier_accesses` с `expires_at = now + срок`.
+    Возвращает `ActivatedAccess` или `None`.
+  - `get_active_access(telegram_id)` — высший по рангу непросроченный тариф (`ActiveAccess`)
+    или `None`.
+- **`CatalogService`** — read-model с гейтингом: `visible_groups(parent_id, tier)`,
+  `visible_videos(group_id, tier)`, `get_group_if_visible`, `get_video_if_visible`
+  (фильтр по `tier_rank(item.min_tier) <= tier_rank(user)`).
+- **`YoutubeCourseParser`** — `parse(text)`: находит YouTube-ссылку, через yt-dlp вытаскивает
+  `title`, `description`, лучшую `thumbnail`. Работает для public/unlisted; для private нужен
+  `YOUTUBE_COOKIES_FILE`.
+
+### `app/api/`
+
+- `main.py` — FastAPI-приложение, мидлварь rate limit на `/api/*`, зависимость
+  `authorize_site` (проверка `X-API-Key == SITE_API_KEY`), эндпоинты (ниже).
+- `limiter.py` — `RedisRateLimiter`: фиксированное окно, ключ `rate-limit:<key>:<window>`,
+  `INCR` + `EXPIRE`; при превышении — `429`. Ключ = `X-API-Key` или IP клиента.
+
+### `app/handlers/`
+
+Роутеры подключаются в порядке (важно): `token_router` → `admin_router` →
+`user_catalog_router`. Так deep-link `/start TOKEN` ловится раньше обычного `/start`, а
+FSM-сообщения админки имеют приоритет над общими хендлерами.
+
+### `app/main.py`
+
+Поднимает `Bot` + `Dispatcher`, вешает `DbMiddleware`, регистрирует роутеры, делает
+`delete_webhook(drop_pending_updates=True)` и `start_polling` с ретраями на сетевые ошибки.
 
 ## Environment
 
-Создай `.env` в корне проекта. `.env` нельзя коммитить.
+Все переменные бэкенда. **Новых переменных под тарифную модель нет** — сроки/ранги тарифов
+зашиты в `app/tiers.py`, не в env.
+
+| Переменная | Обяз. | Назначение |
+|------------|:----:|------------|
+| `BOT_TOKEN` | да | Токен бота от @BotFather. |
+| `BOT_USERNAME` | да | Username бота без `@` — для deep link `?start=`. |
+| `ADMIN_IDS` | да | TG id админов через запятую (доступ к `/admin`). |
+| `SITE_API_KEY` | да | Общий секрет с сайтом; **должен совпадать** с `COURSES_BOT_API_KEY` в `.env` сайта. |
+| `DATABASE_URL` | да | `postgresql+asyncpg://user:pass@postgres:5432/db` (host `postgres` в Docker). |
+| `POSTGRES_DB`/`POSTGRES_USER`/`POSTGRES_PASSWORD` | да | Для контейнера postgres. |
+| `REDIS_URL` | да | `redis://redis:6379/0` (host `redis` в Docker). |
+| `RATE_LIMIT_REQUESTS` | нет | Лимит запросов в окне (по умолч. 60). |
+| `RATE_LIMIT_WINDOW_SECONDS` | нет | Длина окна, сек (по умолч. 60). |
+| `SUPPORT_USERNAME` | нет | Username для кнопки «Написати тренеру». Пусто → кнопки нет. |
+| `YOUTUBE_COOKIES_FILE` | нет | Путь к cookies.txt — только если видео PRIVATE (для unlisted не нужен). |
+
+### Пример `.env`
 
 ```env
-BOT_TOKEN=123456789:YOUR_TELEGRAM_BOT_TOKEN
-BOT_USERNAME=YourBotUsername
-ADMIN_IDS=123456789
+# --- Telegram ---
+BOT_TOKEN=123456789:AA-yourtelegrambottoken
+BOT_USERNAME=your_course_bot
+ADMIN_IDS=692080442,111111111
+SUPPORT_USERNAME=trainer_username
+YOUTUBE_COOKIES_FILE=
 
+# --- База ---
 POSTGRES_DB=bot_db
 POSTGRES_USER=bot_user
-POSTGRES_PASSWORD=bot_password
-DATABASE_URL=postgresql+asyncpg://bot_user:bot_password@postgres:5432/bot_db
+POSTGRES_PASSWORD=super-secret-db-password
+DATABASE_URL=postgresql+asyncpg://bot_user:super-secret-db-password@postgres:5432/bot_db
 
-SITE_API_KEY=change-me-long-random-secret
+# --- Безопасность API (общий секрет с сайтом) ---
+SITE_API_KEY=change-me-to-a-long-random-secret
 
+# --- Redis / rate limit ---
 REDIS_URL=redis://redis:6379/0
 RATE_LIMIT_REQUESTS=60
 RATE_LIMIT_WINDOW_SECONDS=60
 ```
 
-Важно:
+> `.env` не коммитить (он в `.gitignore`). В репозитории — только `.env.example`.
 
-- Для Docker `DATABASE_URL` должен использовать host `postgres`.
-- Для Docker `REDIS_URL` должен использовать host `redis`.
-- `SITE_API_KEY` должен храниться только на backend-е сайта, не во frontend-е.
-
-## Local development
-
-Полный чистый запуск:
+## Полный чистый запуск — Dev
 
 ```bash
-sudo docker compose down -v
-sudo docker compose up -d postgres redis
+# 1. .env
+cp .env.example .env          # затем впиши реальные значения
+
+# 2. чистый старт инфраструктуры
+sudo docker compose down -v               # снести старые контейнеры и тома
+sudo docker compose up -d postgres redis  # поднять БД и Redis
+
+# 3. миграции (создаст все таблицы, включая каталог и тарифы)
 sudo docker compose run --rm api alembic upgrade head
+
+# 4. поднять API + бота
 sudo docker compose up --build
 ```
 
-Проверить контейнеры:
+Проверки в другом терминале:
 
 ```bash
-sudo docker compose ps
+curl http://localhost:8000/health                 # {"status":"ok"}
+sudo docker compose exec redis redis-cli ping      # PONG
+sudo docker compose exec postgres pg_isready -U bot_user -d bot_db
+sudo docker compose ps                             # все контейнеры up
 ```
 
-Проверить Redis:
+## Полный чистый запуск — Prod
+
+Прод-compose: `deploy/docker-compose.prod.yml` (PostgreSQL не пробрасывается наружу, есть
+`migrate`, `caddy`, healthcheck'и).
 
 ```bash
-sudo docker compose exec redis redis-cli ping
-```
+# 1. .env с боевыми значениями (реальный бот заказчицы, сильный SITE_API_KEY)
+nano .env
 
-Ожидаемо:
-
-```text
-PONG
-```
-
-Проверить API:
-
-```bash
-curl http://localhost:8000/health
-```
-
-Ожидаемо:
-
-```json
-{"status":"ok"}
-```
-
-## Production startup
-
-Production compose лежит в `deploy/docker-compose.prod.yml`.
-
-Он отличается от dev compose:
-
-- PostgreSQL не пробрасывается наружу.
-- Нет volume `.:/app` для кода.
-- Есть `migrate`, который запускает `alembic upgrade head`.
-- Есть `caddy` для HTTPS reverse proxy.
-- Есть healthchecks для API, Redis и PostgreSQL.
-
-Запуск:
-
-```bash
-sudo docker compose -f deploy/docker-compose.prod.yml up -d --build
-```
-
-Caddy config:
-
-```bash
+# 2. Caddy: домен + IP бэкенда сайта
 cp deploy/Caddyfile.example deploy/Caddyfile
+nano deploy/Caddyfile         # заменить api.example.com на реальный домен,
+                              # временный IP — на публичный IP бэкенда сайта
+# и подключить ./Caddyfile вместо ./Caddyfile.example в deploy/docker-compose.prod.yml
+
+# 3. чистый старт (migrate сам прогонит alembic upgrade head)
+sudo docker compose -f deploy/docker-compose.prod.yml down
+sudo docker compose -f deploy/docker-compose.prod.yml up -d --build
+
+# 4. проверки
+sudo docker compose -f deploy/docker-compose.prod.yml ps
+curl https://<домен>/health
+./scripts/prod_healthcheck.sh
 ```
 
-Потом в `deploy/docker-compose.prod.yml` лучше заменить volume:
+Бэкап БД: `./scripts/backup_postgres.sh` (каталог `backups/` в `.gitignore` — не коммитить).
 
-```yaml
-- ./Caddyfile.example:/etc/caddy/Caddyfile:ro
-```
+## Команды бота
 
-на:
+### Пользовательские
 
-```yaml
-- ./Caddyfile:/etc/caddy/Caddyfile:ro
-```
+| Команда | Что делает |
+|---------|------------|
+| `/start` | Без токена. Есть активный доступ — показывает каталог тренировок; иначе подсказку «оплати на сайте». |
+| `/start <TOKEN>` | Deep link с сайта. Активирует токен, выдаёт тариф на срок, сразу открывает каталог. Если ссылка уже использована, но доступ активен — просто откроет каталог. |
+| `/activate <TOKEN>` | Ручная активация токена (если deep link не сработал). |
+| `/catalog` | Каталог («Мої тренування»): группы → подгруппы → видео. Показывает тариф и сколько дней осталось. |
+| `/myaccess` | Синоним `/catalog` («мій доступ і термін»). |
+| `/mycourses` | Синоним `/catalog` (для совместимости). |
+| `/help` | Список команд. Админам дополнительно показывает `/admin`. |
 
-В `deploy/Caddyfile` замени `api.example.com` на реальный домен и временный IP `192.168.0.194` на публичный IP backend-а сайта.
+Навигация по каталогу — инлайн-кнопками: `📁 Група` → подгруппы/видео → `▶️ Відео` (карточка
+с обложкой и кнопкой **«▶️ Дивитись»** на YouTube), `⬅️ Назад`. Контент фильтруется по тарифу,
+доступ проверяется по сроку на каждом заходе.
 
-## Database schema
+### Админские (только id из `ADMIN_IDS`)
 
-Основные таблицы:
+| Команда | Что делает |
+|---------|------------|
+| `/admin` | Открывает панель управления каталогом. |
 
-### `courses`
+Внутри `/admin` всё на инлайн-кнопках (отдельных команд нет):
 
-Курсы, которые можно продавать.
+- **➕ Нова група** — создать группу верхнего уровня (бот спросит название).
+- В группе: **➕ Підгрупа**, **➕ Відео**, **✏️ Назва**, **🗑 Видалити**, ряд тарифов
+  **`Lite / Pro / VIP`** (минимальный тариф для показа группы), **⬅️ Назад**.
+- **➕ Відео** — бот просит ссылку на YouTube; сам подтягивает название и обложку (yt-dlp) и
+  создаёт видео. `min_tier` видео наследуется от группы, меняется кнопками `Lite/Pro/VIP` на
+  экране видео.
+- Удаление группы каскадно удаляет её подгруппы и видео (с подтверждением).
 
-Поля:
-
-- `id` — стабильный ID курса, например `python-backend`.
-- `title` — название курса.
-- `description` — описание.
-- `invite_link` — fallback-ссылка, если `telegram_chat_id` не настроен.
-- `telegram_chat_id` — ID приватного Telegram-канала курса.
-- `is_active` — можно ли продавать курс.
-
-### `access_tokens`
-
-Одноразовые токены.
-
-- `token_hash` — hash raw token.
-- `token_preview` — preview для админки/логов.
-- `payment_id` — ID платежа сайта.
-- `is_used` — активирован ли токен.
-- `used_by_tg_id` — Telegram ID активировавшего пользователя.
-
-### `token_courses`
-
-Связь один токен → много курсов.
-
-### `user_course_accesses`
-
-Реальный доступ пользователя к курсам.
-
-### `payment_event_logs`
-
-События для аудита: создание токена, дубль платежа, активация токена, ошибки.
-
-## API auth
-
-Все `/api/*` endpoint-ы требуют header:
-
-```http
-X-API-Key: SITE_API_KEY
-```
-
-Нельзя вызывать API напрямую из браузера, потому что `SITE_API_KEY` утечёт. Правильно:
-
-```text
-frontend сайта → backend сайта → CoursesSalesBot API
-```
+> **Важно про видео:** заливай ролики на YouTube как **«Доступ за посиланням» (unlisted)**, а не
+> «Приватне». Приватные видны только приглашённым по почте — бот не вытащит обложку и не покажет
+> их покупателю. Для истинно приватных нужен `YOUTUBE_COOKIES_FILE`.
 
 ## API endpoints
 
-Base URL локально:
+Базовый URL локально: `http://localhost:8000`. Все `/api/*` требуют заголовок
+`X-API-Key: <SITE_API_KEY>` и лимитированы (`429` при превышении). Вызывать только с
+бэкенда сайта, не из браузера.
 
-```text
-http://localhost:8000
-```
+### `GET /health`
 
-### GET /health
+Без авторизации. Health-check. → `{ "status": "ok" }`
 
-```bash
-curl http://localhost:8000/health
-```
+### `POST /api/tokens`
 
-Response:
-
-```json
-{"status":"ok"}
-```
-
-### POST /api/courses
-
-Создаёт или обновляет курс.
-
-```bash
-curl -X POST http://localhost:8000/api/courses \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $SITE_API_KEY" \
-  -d '{
-    "id": "python-backend",
-    "title": "Python Backend",
-    "description": "Backend course",
-    "invite_link": null,
-    "telegram_chat_id": -1001234567890,
-    "is_active": true
-  }'
-```
-
-`telegram_chat_id` нужен для одноразовых invite links. Бот должен быть администратором этого приватного канала и иметь право создавать invite links.
-
-Response:
-
-```json
-{
-  "id": "python-backend",
-  "title": "Python Backend",
-  "description": "Backend course",
-  "invite_link": null,
-  "telegram_chat_id": -1001234567890,
-  "is_active": true
-}
-```
-
-### GET /api/courses
-
-```bash
-curl http://localhost:8000/api/courses \
-  -H "X-API-Key: $SITE_API_KEY"
-```
-
-Возвращает активные курсы.
-
-### GET /api/courses/{course_id}
-
-```bash
-curl http://localhost:8000/api/courses/python-backend \
-  -H "X-API-Key: $SITE_API_KEY"
-```
-
-Возвращает один курс или `404`.
-
-### POST /api/tokens
-
-Создаёт одноразовый токен на один или несколько курсов.
+Создаёт одноразовый токен под тариф. Идемпотентно по `payment_id`.
 
 ```bash
 curl -X POST http://localhost:8000/api/tokens \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $SITE_API_KEY" \
-  -d '{
-    "course_ids": ["python-backend", "csharp-aspnet"],
-    "payment_id": "payment-123"
-  }'
+  -d '{ "tier": "pro", "payment_id": "pro-3f1c...uuid" }'
 ```
 
-Response:
+Поля запроса:
+
+- `tier` (обяз.) — `lite` | `pro` | `vip`.
+- `payment_id` (опц., ≤128) — id платежа. Повтор с тем же → `409`.
+- `duration_days` (опц., 1…3650) — переопределяет срок тарифа. Обычно не передаётся.
+
+Ответ `200`:
 
 ```json
 {
   "token": "raw-token",
-  "course_ids": ["python-backend", "csharp-aspnet"],
-  "payment_id": "payment-123",
-  "token_preview": "abc123...xyz",
-  "telegram_link": "https://t.me/YourBotUsername?start=raw-token"
+  "tier": "pro",
+  "duration_days": 30,
+  "payment_id": "pro-3f1c...uuid",
+  "token_preview": "abc123...wxyz",
+  "telegram_link": "https://t.me/your_course_bot?start=raw-token"
 }
 ```
 
-Errors:
+Ошибки: `400` — неизвестный тариф; `401` — неверный `X-API-Key`; `409` — `payment_id` уже
+использован (норма для ретрая вебхука); `429` — rate limit.
 
-- `401` — invalid API key.
-- `404` — курс не найден или выключен.
-- `409` — `payment_id` уже использован.
-- `429` — rate limit.
+### `GET /api/access/check`
 
-### GET /api/access/check
-
-Проверяет доступ к одному курсу.
+Текущий доступ пользователя (высший непросроченный тариф).
 
 ```bash
-curl "http://localhost:8000/api/access/check?telegram_id=123456789&course_id=python-backend" \
+curl "http://localhost:8000/api/access/check?telegram_id=692080442" \
   -H "X-API-Key: $SITE_API_KEY"
 ```
 
-Response:
+Ответ `200`:
 
 ```json
 {
+  "telegram_id": 692080442,
   "has_access": true,
-  "telegram_id": 123456789,
-  "course_id": "python-backend"
+  "tier": "pro",
+  "expires_at": "2026-07-22T10:00:00+00:00"
 }
 ```
 
-### POST /api/access/check
+Нет доступа → `has_access: false`, `tier: null`, `expires_at: null`.
 
-Проверяет доступ к нескольким курсам.
-
-```bash
-curl -X POST http://localhost:8000/api/access/check \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $SITE_API_KEY" \
-  -d '{
-    "telegram_id": 123456789,
-    "course_ids": ["python-backend", "csharp-aspnet", "sql-basics"]
-  }'
-```
-
-Response:
-
-```json
-{
-  "telegram_id": 123456789,
-  "access": {
-    "python-backend": true,
-    "csharp-aspnet": true,
-    "sql-basics": false
-  }
-}
-```
-
-## Telegram bot commands
-
-- `/start` — описание бота.
-- `/start TOKEN` — активация токена из deep link.
-- `/activate TOKEN` — ручная активация токена.
-- `/mycourses` — список активированных курсов.
-- `/help` — список команд.
-- `/token COURSE_ID COURSE_ID2` — admin-only создание токена вручную.
-
-При активации токена бот создаёт Telegram invite link с `member_limit=1`, если у курса задан `telegram_chat_id`. Если `telegram_chat_id` не задан, бот использует fallback `invite_link`.
-
-## How to test everything
-
-### 1. Pull latest code
-
-```bash
-cd ~/Documents/repos/CoursesSalesBot
-git pull --rebase origin main
-```
-
-### 2. Check `.env`
-
-```bash
-cat .env
-```
-
-Проверь, что есть:
-
-```env
-DATABASE_URL=postgresql+asyncpg://admin:67584738567@postgres:5432/UsersDb
-REDIS_URL=redis://redis:6379/0
-SITE_API_KEY=LoshkoAndTohskoInEveryProject
-BOT_USERNAME=test_courses_sales_bot
-```
-
-### 3. Clean run
-
-```bash
-sudo docker compose down -v
-sudo docker compose up -d postgres redis
-sudo docker compose run --rm api alembic upgrade head
-sudo docker compose up --build
-```
-
-### 4. Health checks
-
-В другом терминале:
-
-```bash
-curl http://localhost:8000/health
-sudo docker compose exec redis redis-cli ping
-sudo docker compose exec postgres pg_isready -U admin -d UsersDb
-```
-
-### 5. Create courses
-
-Fallback-link course:
-
-```bash
-curl -X POST http://localhost:8000/api/courses \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: LoshkoAndTohskoInEveryProject" \
-  -d '{
-    "id": "python-backend",
-    "title": "Python Backend",
-    "description": "Backend course",
-    "invite_link": "https://t.me/+example_python",
-    "telegram_chat_id": null,
-    "is_active": true
-  }'
-```
-
-Private-channel course:
-
-```bash
-curl -X POST http://localhost:8000/api/courses \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: LoshkoAndTohskoInEveryProject" \
-  -d '{
-    "id": "private-python",
-    "title": "Private Python Channel",
-    "description": "Course with one-time invite link",
-    "invite_link": null,
-    "telegram_chat_id": -1001234567890,
-    "is_active": true
-  }'
-```
-
-Для теста `private-python` замени `-1001234567890` на настоящий ID приватного канала, где бот является админом.
-
-### 6. List courses
-
-```bash
-curl http://localhost:8000/api/courses \
-  -H "X-API-Key: LoshkoAndTohskoInEveryProject"
-```
-
-### 7. Create token for multiple courses
-
-```bash
-curl -X POST http://localhost:8000/api/tokens \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: LoshkoAndTohskoInEveryProject" \
-  -d '{
-    "course_ids": ["python-backend", "private-python"],
-    "payment_id": "payment-123"
-  }'
-```
-
-Скопируй `telegram_link`.
-
-### 8. Check duplicate payment protection
-
-Повтори запрос с тем же `payment_id`. Ожидаемый результат: `409 Conflict`.
-
-### 9. Activate token in Telegram
-
-Открой `telegram_link`.
-
-Ожидаемо:
+## Контракт сайт ↔ бот
 
 ```text
-Доступ активирован.
-
-Курсы:
-1. Python Backend (python-backend)
-   Материалы: https://t.me/+example_python
-
-2. Private Python Channel (private-python)
-   Материалы: https://t.me/+one_time_invite
+фронтенд сайта → бэкенд сайта → CoursesSalesBot API
 ```
 
-Для `telegram_chat_id` бот должен создать новую одноразовую ссылку. Если бот не админ канала, в логах будет ошибка, и будет использован fallback `invite_link`, если он задан.
+1. Покупатель оплачивает тариф (Monobank) на сайте.
+2. Вебхук сайта вызывает `POST /api/tokens` с `{ payment_id, tier }` (tier = префикс reference).
+3. Бот отдаёт `telegram_link`; сайт показывает кнопку «Перейти в Telegram».
+4. Покупатель открывает ссылку → бот активирует токен → выдаёт тариф на срок → каталог.
+5. (Опц.) Сайт сверяется через `GET /api/access/check`.
 
-### 10. Check bot commands
+## How to test (E2E)
 
-В Telegram:
+1. Подними бота локально (см. «Полный чистый запуск — Dev»).
+2. В Telegram: `/admin` → создай группу → добавь видео ютуб-ссылкой. Часть видео пометь
+   `min_tier=pro`.
+3. Выдай себе тариф: `POST /api/tokens { "tier": "lite" }`, открой `telegram_link`.
+   Убедись, что `pro`-видео НЕ видно. Повтори с `tier: "vip"` — видно всё.
+4. Срок: `/myaccess` показывает оставшиеся дни.
+5. Дубль платежа: повтори `POST /api/tokens` с тем же `payment_id` → `409`.
 
-```text
-/mycourses
-/help
-```
+## Известные ограничения / phase 2
 
-### 11. Check access API
+- Нет перестановки порядка групп/видео в UI (поле `position` есть, кнопок ↑/↓ нет).
+- Нет авто-уведомления об истечении доступа.
+- Легаси course-таблицы и модули не удалены.
+- Тесты есть только на YouTube-парсер (`tests/test_youtube_parser.py`).
 
-```bash
-curl "http://localhost:8000/api/access/check?telegram_id=692080442&course_id=python-backend" \
-  -H "X-API-Key: LoshkoAndTohskoInEveryProject"
-```
-
-Bulk check:
-
-```bash
-curl -X POST http://localhost:8000/api/access/check \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: LoshkoAndTohskoInEveryProject" \
-  -d '{
-    "telegram_id": 692080442,
-    "course_ids": ["python-backend", "private-python", "missing-course"]
-  }'
-```
-
-### 12. Check database
-
-```bash
-sudo docker compose exec postgres psql -U admin -d UsersDb
-```
-
-```sql
-select id, title, invite_link, telegram_chat_id, is_active from courses;
-select id, payment_id, course_id, is_used, used_by_tg_id, used_at from access_tokens;
-select token_id, course_id from token_courses;
-select telegram_id, course_id, token_id, created_at from user_course_accesses;
-select event_type, status, payment_id, course_ids, telegram_id, token_id, created_at
-from payment_event_logs
-order by id desc;
-```
-
-### 13. Check backup
-
-```bash
-chmod +x scripts/backup_postgres.sh scripts/prod_healthcheck.sh
-./scripts/backup_postgres.sh
-ls -lah backups
-```
-
-### 14. Check health script
-
-```bash
-./scripts/prod_healthcheck.sh
-```
-
-## Code review notes
-
-Current status:
-
-- Good: token hashing is used; raw token is not stored.
-- Good: `payment_id` prevents duplicate token creation.
-- Good: multi-course purchase is supported through `token_courses`.
-- Good: API rate limit is Redis-backed.
-- Good: prod compose does not expose PostgreSQL.
-- Good: bot can create one-time Telegram invite links.
-
-Known limitations:
-
-- There are no automated tests yet.
-- `/mycourses` intentionally does not create new one-time invite links to prevent abuse.
-- Caddy allowlist currently contains temporary local IP `192.168.0.194`; replace it with the public IP of the website backend.
-- Backups must not be committed. `backups/` is ignored now, but remove any already committed backup files from Git history before serious production use.
-
-## Troubleshooting Telegram polling
+## Troubleshooting
 
 ### `TelegramConflictError: terminated by other getUpdates request`
 
-Telegram allows only one active long-polling consumer per bot token. If this error appears, another bot process is already using the same `BOT_TOKEN`.
-
-How to check and fix locally:
+Один токен бота = один long-polling consumer. Убедись, что бот не запущен где-то ещё:
 
 ```bash
-docker ps --filter name=aiogram_bot
 sudo docker compose down --remove-orphans
 sudo docker compose up --build
 ```
 
-Also check that the same bot token is not running in another terminal, on a server, or in another Docker Compose project. For parallel local/prod testing, use a separate Telegram bot token for each environment.
-
-The `/add_course URL` command imports a course from a YouTube link. Admins can also send a YouTube link as a normal message, and the bot will import it automatically.
+Для параллельного локал/прод-тестирования используй разные токены ботов.
