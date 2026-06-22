@@ -4,11 +4,12 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.repositories.access_repository import AccessRepository
-from app.repositories.course_repository import CourseRepository
+from app.repositories.content_group_repository import ContentGroupRepository
 from app.repositories.payment_event_repository import PaymentEventRepository
-from app.repositories.token_course_repository import TokenCourseRepository
+from app.repositories.tier_access_repository import TierAccessRepository
 from app.repositories.token_repository import TokenRepository
+from app.repositories.video_repository import VideoRepository
+from app.services.catalog_service import CatalogService
 from app.services.token_service import TokenService
 
 
@@ -23,17 +24,24 @@ class DbMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         async with self.session_maker() as session:
+            content_group_repository = ContentGroupRepository(session)
+            video_repository = VideoRepository(session)
+
             token_service = TokenService(
                 token_repository=TokenRepository(session),
-                access_repository=AccessRepository(session),
-                token_course_repository=TokenCourseRepository(session),
-                course_repository=CourseRepository(session),
+                tier_access_repository=TierAccessRepository(session),
                 payment_event_repository=PaymentEventRepository(session),
+            )
+            catalog_service = CatalogService(
+                content_group_repository=content_group_repository,
+                video_repository=video_repository,
             )
 
             data["session"] = session
             data["token_service"] = token_service
-            data["course_repository"] = CourseRepository(session)
+            data["catalog_service"] = catalog_service
+            data["content_group_repository"] = content_group_repository
+            data["video_repository"] = video_repository
 
             try:
                 result = await handler(event, data)

@@ -1,0 +1,43 @@
+from datetime import datetime
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database.models import UserTierAccess
+
+
+class TierAccessRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create(
+        self,
+        telegram_id: int,
+        tier: str,
+        expires_at: datetime,
+        token_id: int | None,
+        payment_id: str | None,
+    ) -> UserTierAccess:
+        access = UserTierAccess(
+            telegram_id=telegram_id,
+            tier=tier,
+            expires_at=expires_at,
+            token_id=token_id,
+            payment_id=payment_id,
+        )
+        self.session.add(access)
+        await self.session.flush()
+        return access
+
+    async def list_active(self, telegram_id: int, now: datetime) -> list[UserTierAccess]:
+        """All non-expired grants for a user, newest first."""
+        stmt = (
+            select(UserTierAccess)
+            .where(
+                UserTierAccess.telegram_id == telegram_id,
+                UserTierAccess.expires_at > now,
+            )
+            .order_by(UserTierAccess.expires_at.desc())
+        )
+        result = await self.session.scalars(stmt)
+        return list(result.all())

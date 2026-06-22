@@ -36,13 +36,17 @@ class TokenRepository:
         token_hash: str,
         token_preview: str,
         created_by_tg_id: int,
-        course_id: str,
+        tier: str | None = None,
+        duration_days: int | None = None,
+        course_id: str | None = None,
         payment_id: str | None = None,
     ) -> AccessToken:
         token = AccessToken(
             token_hash=token_hash,
             token_preview=token_preview,
             created_by_tg_id=created_by_tg_id,
+            tier=tier,
+            duration_days=duration_days,
             course_id=course_id,
             payment_id=payment_id,
         )

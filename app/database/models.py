@@ -1,7 +1,18 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, func, text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -42,7 +53,12 @@ class AccessToken(Base):
     )
     token_preview: Mapped[str] = mapped_column(String(16), nullable=False)
 
-    course_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    # Legacy course-based field (kept nullable for backward compatibility).
+    course_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+
+    # Tier-based purchase: token grants this subscription tier for `duration_days`.
+    tier: Mapped[str | None] = mapped_column(String(16), index=True, nullable=True)
+    duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     payment_id: Mapped[str | None] = mapped_column(
         String(128),
@@ -119,6 +135,96 @@ class UserCourseAccess(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class ContentGroup(Base):
+    """A group or subgroup of videos in the in-bot catalog.
+
+    Top-level groups have ``parent_id is None``. A subgroup points to its parent
+    group via ``parent_id``. Only two levels are used in the UI (group → subgroup),
+    but the self-reference allows nesting if ever needed.
+    """
+
+    __tablename__ = "content_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("content_groups.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    # Minimum tier required to see this group (lite|pro|vip).
+    min_tier: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'lite'"))
+    position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    children: Mapped[list["ContentGroup"]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    videos: Mapped[list["Video"]] = relationship(
+        back_populates="group",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class Video(Base):
+    """A single video (private/unlisted YouTube link) inside a group."""
+
+    __tablename__ = "videos"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("content_groups.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    youtube_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    thumbnail_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Minimum tier required to watch this video (lite|pro|vip).
+    min_tier: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'lite'"))
+    position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    group: Mapped["ContentGroup"] = relationship(back_populates="videos")
+
+
+class UserTierAccess(Base):
+    """A tier grant for a user, with its own expiry.
+
+    A user may have several rows over time (re-purchases / upgrades). The effective
+    access is the highest-rank tier among rows whose ``expires_at`` is in the future.
+    """
+
+    __tablename__ = "user_tier_accesses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    token_id: Mapped[int | None] = mapped_column(
+        ForeignKey("access_tokens.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    payment_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class PaymentEventLog(Base):

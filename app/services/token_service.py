@@ -1,22 +1,22 @@
+"""Tier-based purchase tokens and access.
+
+Flow:
+- Site calls ``create_token(tier, payment_id)`` after a successful payment.
+- A one-time opaque token is issued; only its sha256 hash is stored.
+- User opens ``https://t.me/<bot>?start=<token>``; ``activate_token`` grants the
+  tier for ``duration_days`` (expiry stored on ``user_tier_accesses``).
+- Content gating reads the user's highest active tier via ``get_active_access``.
+"""
+
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
 
-from app.repositories.access_repository import AccessRepository
-from app.repositories.course_repository import CourseRepository
 from app.repositories.payment_event_repository import PaymentEventRepository
-from app.repositories.token_course_repository import TokenCourseRepository
+from app.repositories.tier_access_repository import TierAccessRepository
 from app.repositories.token_repository import TokenRepository
-
-
-@dataclass(frozen=True)
-class CourseInfo:
-    id: str
-    title: str
-    description: str | None
-    invite_link: str | None
-    telegram_chat_id: int | None
+from app.tiers import duration_days_for_tier, normalize_tier, tier_rank
 
 
 @dataclass(frozen=True)
@@ -24,33 +24,31 @@ class CreatedToken:
     token_id: int
     raw_token: str
     token_preview: str
-    courses: list[CourseInfo]
+    tier: str
+    duration_days: int
     payment_id: str | None
-
-    @property
-    def course_ids(self) -> list[str]:
-        return [course.id for course in self.courses]
 
 
 @dataclass(frozen=True)
 class ActivatedAccess:
     telegram_id: int
-    courses: list[CourseInfo]
+    tier: str
+    expires_at: datetime
     token_id: int
 
-    @property
-    def course_ids(self) -> list[str]:
-        return [course.id for course in self.courses]
+
+@dataclass(frozen=True)
+class ActiveAccess:
+    tier: str
+    expires_at: datetime
 
 
 class TokenAlreadyExistsError(Exception):
     pass
 
 
-class CoursesNotFoundError(Exception):
-    def __init__(self, course_ids: list[str]):
-        self.course_ids = course_ids
-        super().__init__(f"Courses not found or inactive: {', '.join(course_ids)}")
+class InvalidTierError(Exception):
+    pass
 
 
 class TokenService:
@@ -59,69 +57,44 @@ class TokenService:
     def __init__(
         self,
         token_repository: TokenRepository,
-        access_repository: AccessRepository,
-        token_course_repository: TokenCourseRepository,
-        course_repository: CourseRepository,
+        tier_access_repository: TierAccessRepository,
         payment_event_repository: PaymentEventRepository | None = None,
     ):
         self.token_repository = token_repository
-        self.access_repository = access_repository
-        self.token_course_repository = token_course_repository
-        self.course_repository = course_repository
+        self.tier_access_repository = tier_access_repository
         self.payment_event_repository = payment_event_repository
 
     async def create_token(
         self,
         created_by_tg_id: int,
-        course_ids: list[str],
+        tier: str,
         payment_id: str | None = None,
+        duration_days: int | None = None,
     ) -> CreatedToken:
-        normalized_course_ids = self.normalize_course_ids(course_ids)
+        try:
+            normalized_tier = normalize_tier(tier)
+        except ValueError as error:
+            raise InvalidTierError(str(error)) from error
+
+        resolved_duration = duration_days if duration_days and duration_days > 0 else duration_days_for_tier(normalized_tier)
         normalized_payment_id = payment_id.strip() if payment_id else None
 
         if normalized_payment_id is not None:
-            existing_token = await self.token_repository.get_by_payment_id(
-                normalized_payment_id
-            )
+            existing_token = await self.token_repository.get_by_payment_id(normalized_payment_id)
             if existing_token is not None:
                 await self.log_event(
                     event_type="token_create",
                     status="duplicate_payment",
                     payment_id=normalized_payment_id,
-                    course_ids=normalized_course_ids,
+                    tier=normalized_tier,
                     message="Token for this payment_id already exists",
                 )
-                raise TokenAlreadyExistsError(
-                    "Token for this payment_id already exists"
-                )
-
-        active_courses = await self.course_repository.get_active_many_by_ids(
-            normalized_course_ids
-        )
-        active_course_ids = {course.id for course in active_courses}
-        missing_course_ids = [
-            course_id
-            for course_id in normalized_course_ids
-            if course_id not in active_course_ids
-        ]
-        if missing_course_ids:
-            await self.log_event(
-                event_type="token_create",
-                status="courses_not_found",
-                payment_id=normalized_payment_id,
-                course_ids=normalized_course_ids,
-                message=f"Missing courses: {', '.join(missing_course_ids)}",
-            )
-            raise CoursesNotFoundError(missing_course_ids)
-
-        courses_by_id = {course.id: self.to_course_info(course) for course in active_courses}
-        ordered_courses = [courses_by_id[course_id] for course_id in normalized_course_ids]
+                raise TokenAlreadyExistsError("Token for this payment_id already exists")
 
         for _ in range(5):
             raw_token = token_urlsafe(self.TOKEN_BYTES)
             token_hash = self.hash_token(raw_token)
-            exists = await self.token_repository.exists_by_hash(token_hash)
-            if exists:
+            if await self.token_repository.exists_by_hash(token_hash):
                 continue
 
             token_preview = self.make_preview(raw_token)
@@ -129,36 +102,29 @@ class TokenService:
                 token_hash=token_hash,
                 token_preview=token_preview,
                 created_by_tg_id=created_by_tg_id,
-                course_id=normalized_course_ids[0],
+                tier=normalized_tier,
+                duration_days=resolved_duration,
                 payment_id=normalized_payment_id,
-            )
-            await self.token_course_repository.create_many(
-                token_id=token.id,
-                course_ids=normalized_course_ids,
             )
             await self.log_event(
                 event_type="token_create",
                 status="success",
                 payment_id=normalized_payment_id,
-                course_ids=normalized_course_ids,
+                tier=normalized_tier,
                 token_id=token.id,
             )
-
             return CreatedToken(
                 token_id=token.id,
                 raw_token=raw_token,
                 token_preview=token_preview,
-                courses=ordered_courses,
+                tier=normalized_tier,
+                duration_days=resolved_duration,
                 payment_id=token.payment_id,
             )
 
         raise RuntimeError("Failed to generate unique token")
 
-    async def activate_token(
-        self,
-        raw_token: str,
-        used_by_tg_id: int,
-    ) -> ActivatedAccess | None:
+    async def activate_token(self, raw_token: str, used_by_tg_id: int) -> ActivatedAccess | None:
         cleaned_token = raw_token.strip()
         if not cleaned_token:
             return None
@@ -166,64 +132,57 @@ class TokenService:
         token_hash = self.hash_token(cleaned_token)
         token = await self.token_repository.get_by_hash_for_update(token_hash)
 
-        if token is None or token.is_used:
+        if token is None or token.is_used or not token.tier:
             return None
 
-        course_ids = await self.token_course_repository.get_course_ids_by_token_id(
-            token.id
-        )
-        if not course_ids:
-            course_ids = [token.course_id]
-
-        courses = await self.course_repository.get_many_by_ids(course_ids)
-        courses_by_id = {course.id: self.to_course_info(course) for course in courses}
-        ordered_courses = [courses_by_id[course_id] for course_id in course_ids if course_id in courses_by_id]
+        tier = token.tier
+        duration_days = token.duration_days or duration_days_for_tier(tier)
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(days=duration_days)
 
         token.is_used = True
         token.used_by_tg_id = used_by_tg_id
-        token.used_at = datetime.now(UTC)
+        token.used_at = now
 
-        await self.access_repository.create_many_missing(
+        await self.tier_access_repository.create(
             telegram_id=used_by_tg_id,
-            course_ids=course_ids,
+            tier=tier,
+            expires_at=expires_at,
             token_id=token.id,
+            payment_id=token.payment_id,
         )
         await self.log_event(
             event_type="token_activate",
             status="success",
             payment_id=token.payment_id,
-            course_ids=course_ids,
+            tier=tier,
             telegram_id=used_by_tg_id,
             token_id=token.id,
         )
 
         return ActivatedAccess(
             telegram_id=used_by_tg_id,
-            courses=ordered_courses,
+            tier=tier,
+            expires_at=expires_at,
             token_id=token.id,
         )
 
-    async def get_user_courses(self, telegram_id: int) -> list[CourseInfo]:
-        accesses = await self.access_repository.get_user_courses(telegram_id)
-        course_ids = [access.course_id for access in accesses]
-        courses = await self.course_repository.get_many_by_ids(course_ids)
-        courses_by_id = {course.id: self.to_course_info(course) for course in courses}
-        return [courses_by_id[course_id] for course_id in course_ids if course_id in courses_by_id]
+    async def get_active_access(self, telegram_id: int) -> ActiveAccess | None:
+        """Highest-rank non-expired tier for a user, or None."""
+        now = datetime.now(UTC)
+        grants = await self.tier_access_repository.list_active(telegram_id, now)
+        if not grants:
+            return None
 
-    async def has_access(self, telegram_id: int, course_id: str) -> bool:
-        normalized_course_id = self.normalize_course_id(course_id)
-        access = await self.access_repository.get_by_user_and_course(
-            telegram_id=telegram_id,
-            course_id=normalized_course_id,
-        )
-        return access is not None
+        best = max(grants, key=lambda grant: (tier_rank(grant.tier), grant.expires_at))
+        return ActiveAccess(tier=best.tier, expires_at=best.expires_at)
 
     async def log_event(
         self,
         event_type: str,
         status: str,
         payment_id: str | None = None,
-        course_ids: list[str] | None = None,
+        tier: str | None = None,
         telegram_id: int | None = None,
         token_id: int | None = None,
         message: str | None = None,
@@ -235,7 +194,7 @@ class TokenService:
             event_type=event_type,
             status=status,
             payment_id=payment_id,
-            course_ids=course_ids,
+            course_ids=[tier] if tier else None,
             telegram_id=telegram_id,
             token_id=token_id,
             message=message,
@@ -248,37 +207,3 @@ class TokenService:
     @staticmethod
     def make_preview(token: str) -> str:
         return f"{token[:6]}...{token[-4:]}"
-
-    @staticmethod
-    def to_course_info(course) -> CourseInfo:
-        return CourseInfo(
-            id=course.id,
-            title=course.title,
-            description=course.description,
-            invite_link=course.invite_link,
-            telegram_chat_id=course.telegram_chat_id,
-        )
-
-    @staticmethod
-    def normalize_course_id(course_id: str) -> str:
-        normalized = course_id.strip()
-        if not normalized:
-            raise ValueError("course_id must not be empty")
-        return normalized
-
-    @classmethod
-    def normalize_course_ids(cls, course_ids: list[str]) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-
-        for course_id in course_ids:
-            normalized_course_id = cls.normalize_course_id(course_id)
-            if normalized_course_id in seen:
-                continue
-            normalized.append(normalized_course_id)
-            seen.add(normalized_course_id)
-
-        if not normalized:
-            raise ValueError("course_ids must not be empty")
-
-        return normalized

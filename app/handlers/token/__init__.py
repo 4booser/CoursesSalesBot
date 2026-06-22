@@ -1,137 +1,39 @@
+"""Token activation: a buyer arrives from the site via a deep link and gets a tier."""
+
 import logging
 
-from aiogram import Bot, Router
+from aiogram import Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import Message
 
-from app.config import settings
-from app.services.token_service import (
-    CourseInfo,
-    CoursesNotFoundError,
-    TokenAlreadyExistsError,
-    TokenService,
-)
-
+from app.services.catalog_service import CatalogService
+from app.services.token_service import ActivatedAccess, TokenService
+from app.handlers.user_catalog import render_home
+from app.tiers import tier_title
 
 router = Router(name=__name__)
 logger = logging.getLogger(__name__)
 
 
-def parse_course_ids(raw_args: str | None) -> list[str]:
-    if not raw_args:
-        return ["default"]
-
-    return [
-        course_id.strip()
-        for course_id in raw_args.replace(",", " ").split()
-        if course_id.strip()
-    ]
-
-
-def format_courses(courses: list[CourseInfo]) -> str:
-    lines: list[str] = []
-
-    for index, course in enumerate(courses, start=1):
-        title = course.title or course.id
-        lines.append(f"{index}. {title} ({course.id})")
-
-    return "\n\n".join(lines)
-
-
-async def create_one_time_invite_link(
-    bot: Bot,
-    course: CourseInfo,
-    telegram_id: int,
-) -> str | None:
-    if course.telegram_chat_id is None:
-        return course.invite_link
-
-    try:
-        invite = await bot.create_chat_invite_link(
-            chat_id=course.telegram_chat_id,
-            name=f"{course.id}:{telegram_id}",
-            member_limit=1,
-            creates_join_request=False,
-        )
-        return invite.invite_link
-
-    except Exception:
-        logger.exception(
-            "Failed to create one-time invite link for course_id=%s chat_id=%s",
-            course.id,
-            course.telegram_chat_id,
-        )
-        return course.invite_link
-
-
-async def format_courses_with_one_time_links(
-    bot: Bot,
-    courses: list[CourseInfo],
-    telegram_id: int,
-) -> str:
-    lines: list[str] = []
-
-    for index, course in enumerate(courses, start=1):
-        title = course.title or course.id
-        line = f"{index}. {title} ({course.id})"
-
-        invite_link = await create_one_time_invite_link(
-            bot=bot,
-            course=course,
-            telegram_id=telegram_id,
-        )
-
-        if invite_link:
-            line += f"\n   Материалы: {invite_link}"
-        else:
-            line += "\n   Материалы: ссылка не настроена. Напиши администратору."
-
-        lines.append(line)
-
-    return "\n\n".join(lines)
-
-
-@router.message(Command("token"))
-async def create_token_handler(
+async def grant_and_show(
     message: Message,
-    command: CommandObject,
+    activated: ActivatedAccess,
     token_service: TokenService,
+    catalog_service: CatalogService,
 ) -> None:
-    if message.from_user is None:
-        await message.answer("Не удалось определить пользователя.")
-        return
-
-    telegram_id = message.from_user.id
-
-    if telegram_id not in settings.admin_ids:
-        await message.answer("Нет доступа.")
-        return
-
-    course_ids = parse_course_ids(command.args)
-
-    try:
-        created_token = await token_service.create_token(
-            created_by_tg_id=telegram_id,
-            course_ids=course_ids,
-        )
-    except ValueError:
-        await message.answer("Укажи корректные course_id: /token python-backend csharp-aspnet")
-        return
-    except CoursesNotFoundError as error:
-        await message.answer(f"Курсы не найдены или выключены: {', '.join(error.course_ids)}")
-        return
-    except TokenAlreadyExistsError:
-        await message.answer("Токен для этого платежа уже существует.")
-        return
-
     await message.answer(
-        "Токен создан.\n\n"
-        f"Курсы:\n{format_courses(created_token.courses)}\n\n"
-        f"Токен: {created_token.raw_token}\n\n"
-        "Сохрани его сейчас. В базе хранится только hash, сырой токен потом восстановить нельзя.\n\n"
-        f"ID: {created_token.token_id}\n"
-        f"Preview: {created_token.token_preview}"
+        "✅ Доступ активовано!\n\n"
+        f"Тариф: <b>{tier_title(activated.tier)}</b>\n"
+        f"Діє до: <b>{activated.expires_at.strftime('%d.%m.%Y')}</b>\n\n"
+        "Ось твої тренування:",
+        parse_mode="HTML",
     )
+    if message.from_user is None:
+        return
+    rendered = await render_home(message.from_user.id, token_service, catalog_service)
+    if rendered is not None:
+        text, markup = rendered
+        await message.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.message(CommandStart(deep_link=True))
@@ -139,52 +41,33 @@ async def start_with_token_handler(
     message: Message,
     command: CommandObject,
     token_service: TokenService,
-    bot: Bot,
+    catalog_service: CatalogService,
 ) -> None:
     if message.from_user is None:
-        await message.answer("Не удалось определить пользователя.")
         return
 
-    raw_token = command.args or ""
-    activated_token = await token_service.activate_token(
-        raw_token=raw_token,
+    activated = await token_service.activate_token(
+        raw_token=command.args or "",
         used_by_tg_id=message.from_user.id,
     )
 
-    if activated_token is None:
-        await message.answer("Токен не найден или уже был использован. Проверь, что ссылка скопирована полностью.")
+    if activated is None:
+        # Token invalid/used — but the user may already have active access.
+        rendered = await render_home(message.from_user.id, token_service, catalog_service)
+        if rendered is not None:
+            text, markup = rendered
+            await message.answer(
+                "Це посилання вже використане або недійсне, але доступ у тебе активний 👇",
+            )
+            await message.answer(text, reply_markup=markup, parse_mode="HTML")
+            return
+        await message.answer(
+            "Посилання недійсне або вже використане. "
+            "Перевір, що скопіював його повністю, або звернись до тренера."
+        )
         return
 
-    courses_text = await format_courses_with_one_time_links(
-        bot=bot,
-        courses=activated_token.courses,
-        telegram_id=message.from_user.id,
-    )
-
-    await message.answer("Доступ активирован.\n\n" f"Курсы:\n{courses_text}")
-
-
-def build_support_keyboard() -> InlineKeyboardMarkup | None:
-    if not settings.SUPPORT_USERNAME:
-        return None
-
-    username = settings.SUPPORT_USERNAME.removeprefix("@")
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Чат со мной", url=f"https://t.me/{username}")]]
-    )
-
-
-@router.message(CommandStart())
-async def start_handler(message: Message) -> None:
-    await message.answer(
-        "Привет. После оплаты на сайте ты получишь ссылку на этого бота. "
-        "Открой её, и я активирую доступ к курсу.\n\n"
-        "Команды:\n"
-        "/activate TOKEN — активировать токен вручную\n"
-        "/mycourses — посмотреть мои курсы\n"
-        "/help — помощь и связь с администратором",
-        reply_markup=build_support_keyboard(),
-    )
+    await grant_and_show(message, activated, token_service, catalog_service)
 
 
 @router.message(Command("activate"))
@@ -192,70 +75,23 @@ async def activate_token_handler(
     message: Message,
     command: CommandObject,
     token_service: TokenService,
-    bot: Bot,
+    catalog_service: CatalogService,
 ) -> None:
     if message.from_user is None:
-        await message.answer("Не удалось определить пользователя.")
         return
 
-    raw_token = command.args or ""
-
-    if not raw_token.strip():
-        await message.answer("Использование: /activate TOKEN")
+    raw_token = (command.args or "").strip()
+    if not raw_token:
+        await message.answer("Використання: /activate TOKEN")
         return
 
-    activated_token = await token_service.activate_token(
+    activated = await token_service.activate_token(
         raw_token=raw_token,
         used_by_tg_id=message.from_user.id,
     )
 
-    if activated_token is None:
-        await message.answer("Токен не найден или уже был использован.")
+    if activated is None:
+        await message.answer("Токен не знайдено або вже використано.")
         return
 
-    courses_text = await format_courses_with_one_time_links(
-        bot=bot,
-        courses=activated_token.courses,
-        telegram_id=message.from_user.id,
-    )
-
-    await message.answer("Доступ активирован.\n\n" f"Курсы:\n{courses_text}")
-
-
-@router.message(Command("mycourses"))
-async def my_courses_handler(
-    message: Message,
-    token_service: TokenService,
-) -> None:
-    if message.from_user is None:
-        await message.answer("Не удалось определить пользователя.")
-        return
-
-    courses = await token_service.get_user_courses(message.from_user.id)
-
-    if not courses:
-        await message.answer("У тебя пока нет активированных курсов.")
-        return
-
-    await message.answer(
-        "Твои курсы:\n\n"
-        f"{format_courses(courses)}\n\n"
-        "Одноразовая ссылка выдаётся при активации токена. "
-        "Если ты потерял ссылку и ещё не вступил в канал, напиши администратору."
-    )
-
-
-@router.message(Command("help"))
-async def help_handler(message: Message) -> None:
-    text = (
-        "Команды:\n"
-        "/start — описание бота\n"
-        "/activate TOKEN — активировать токен вручную\n"
-        "/mycourses — посмотреть активированные курсы\n\n"
-        "После оплаты лучше открывать ссылку с сайта — токен активируется автоматически."
-    )
-
-    if message.from_user is not None and message.from_user.id in settings.admin_ids:
-        text += "\n\nАдмин:\n/add_course URL — импортировать курс из YouTube-ссылки"
-
-    await message.answer(text, reply_markup=build_support_keyboard())
+    await grant_and_show(message, activated, token_service, catalog_service)
