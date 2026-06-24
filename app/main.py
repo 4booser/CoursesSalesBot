@@ -5,7 +5,7 @@ from typing import TypeVar
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramNetworkError
-from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ErrorEvent
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -91,7 +91,10 @@ async def main() -> None:
         return
 
     bot = Bot(token=settings.BOT_TOKEN)
-    storage = RedisStorage.from_url(settings.REDIS_URL)
+    # In-memory FSM is safe here: the advisory lock above guarantees a single bot
+    # process, so there's no shared-state need that would require Redis. State is
+    # only lost on restart (mid-flow admin actions), which is acceptable.
+    storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
     dp.update.middleware(DbMiddleware(session_maker))

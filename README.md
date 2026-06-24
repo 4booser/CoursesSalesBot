@@ -184,8 +184,11 @@ FSM-сообщения админки имеют приоритет над об�
 
 ### `app/main.py`
 
-Поднимает `Bot` + `Dispatcher`, вешает `DbMiddleware`, регистрирует роутеры, делает
-`delete_webhook(drop_pending_updates=True)` и `start_polling` с ретраями на сетевые ошибки.
+Поднимает `Bot` + `Dispatcher` (FSM на `MemoryStorage`), вешает `DbMiddleware`, регистрирует
+роутеры и глобальный error-handler (`@dp.errors()` — пишет traceback в лог и шлёт юзеру «Сталася
+помилка»). На старте берёт **Postgres advisory-lock** (`pg_try_advisory_lock`) — второй инстанс на
+той же БД не запустится; делает `delete_webhook(drop_pending_updates=True)` и `start_polling` с
+ретраями на сетевые ошибки.
 
 ## Environment
 
@@ -233,58 +236,117 @@ RATE_LIMIT_WINDOW_SECONDS=60
 
 > `.env` не коммитить (он в `.gitignore`). В репозитории — только `.env.example`.
 
+## ⚠️ Главное правило: один инстанс на токен
+
+Telegram отдаёт long-polling (`getUpdates`) **только одному** процессу. Если на одном
+`BOT_TOKEN` крутятся два бота — они дерутся за апдейты (`TelegramConflictError`), сообщения
+теряются, бот «работает через раз».
+
+В коде есть защита: на старте бот берёт **Postgres advisory-lock** — второй инстанс на той же
+БД просто не запустится. Но это **не спасает между разными БД** (например, dev-стек и prod-стек
+поднимают свои отдельные postgres). Поэтому правило простое:
+
+> **Никогда не держи dev- и prod-стек запущенными одновременно на одном `BOT_TOKEN`.**
+> Перед запуском другого стека — погаси текущий (`down`). Для параллельной работы — разные боты/токены.
+
+FSM-состояние админки хранится в `MemoryStorage` (в памяти процесса): сбрасывается при рестарте
+бота — это нормально, отдельный Redis для FSM не нужен.
+
 ## Полный чистый запуск — Dev
 
+Dev-compose: корневой `docker-compose.yml`. Сервисы: `postgres` (порт хоста **5433**→5432),
+`redis` (без внешнего порта), `api` (**8000**→8000), `bot`. Код примонтирован томом `.:/app`.
+Сервиса `migrate` тут нет — миграции прогоняем руками.
+
 ```bash
+# 0. убедись, что prod-стек не запущен (один инстанс на токен!)
+sudo docker compose -f deploy/docker-compose.prod.yml down 2>/dev/null
+
 # 1. .env
 cp .env.example .env          # затем впиши реальные значения
 
-# 2. чистый старт инфраструктуры
-sudo docker compose down -v               # снести старые контейнеры и тома
-sudo docker compose up -d postgres redis  # поднять БД и Redis
+# 2. чистый старт инфраструктуры (-v сносит и тома → пустая БД)
+sudo docker compose down -v
+sudo docker compose up -d postgres redis
 
-# 3. миграции (создаст все таблицы, включая каталог и тарифы)
+# 3. миграции (создаст все таблицы: каталог, тарифы, токены, аудит)
 sudo docker compose run --rm api alembic upgrade head
 
 # 4. поднять API + бота
-sudo docker compose up --build
+sudo docker compose up -d --build
+
+# 5. логи бота — должно быть "Run polling ..." без TelegramConflictError
+sudo docker compose logs -f bot
 ```
 
 Проверки в другом терминале:
 
 ```bash
-curl http://localhost:8000/health                 # {"status":"ok"}
-sudo docker compose exec redis redis-cli ping      # PONG
-sudo docker compose exec postgres pg_isready -U bot_user -d bot_db
-sudo docker compose ps                             # все контейнеры up
+curl http://localhost:8000/health                  # {"status":"ok"}
+sudo docker compose exec redis redis-cli ping       # PONG
+sudo docker compose exec postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+sudo docker compose ps                              # postgres/redis/api/bot — Up
+```
+
+Отдать локальный API сайту (без домена) — быстрый туннель Cloudflare:
+
+```bash
+docker run --rm -it --network coursessalesbot_default \
+  cloudflare/cloudflared:latest tunnel --url http://api:8000
+# выдаст https://<random>.trycloudflare.com — этот URL пропиши в COURSES_BOT_API_URL на сайте.
+# ВНИМАНИЕ: URL новый при КАЖДОМ запуске туннеля — после рестарта обнови env на сайте.
 ```
 
 ## Полный чистый запуск — Prod
 
-Прод-compose: `deploy/docker-compose.prod.yml` (PostgreSQL не пробрасывается наружу, есть
-`migrate`, `caddy`, healthcheck'и).
+Prod-compose: `deploy/docker-compose.prod.yml`. Отличия от dev: PostgreSQL **не** торчит наружу;
+есть сервис **`migrate`** (сам гоняет `alembic upgrade head` до старта `api`/`bot`), **`caddy`**
+(HTTPS reverse-proxy на `api:8000`), healthcheck'и на всех сервисах.
 
 ```bash
-# 1. .env с боевыми значениями (реальный бот заказчицы, сильный SITE_API_KEY)
+# 0. погаси dev-стек (один инстанс на токен!)
+sudo docker compose down 2>/dev/null
+
+# 1. .env с боевыми значениями:
+#    - BOT_TOKEN / BOT_USERNAME — реальный бот заказчицы
+#    - ADMIN_IDS — её telegram id
+#    - SITE_API_KEY — длинный случайный секрет (== COURSES_BOT_API_KEY на сайте)
+#    - DATABASE_URL → host postgres, REDIS_URL → host redis
 nano .env
 
-# 2. Caddy: домен + IP бэкенда сайта
-cp deploy/Caddyfile.example deploy/Caddyfile
-nano deploy/Caddyfile         # заменить api.example.com на реальный домен,
-                              # временный IP — на публичный IP бэкенда сайта
-# и подключить ./Caddyfile вместо ./Caddyfile.example в deploy/docker-compose.prod.yml
+# 2. Caddy: вписать реальный домен и IP бэкенда сайта.
+#    Compose монтирует deploy/Caddyfile.example напрямую — правим именно его:
+nano deploy/Caddyfile.example
+#    api.example.com  → твой домен API бота
+#    remote_ip 192.168.0.194 → публичный IP бэкенда сайта (allowlist)
 
-# 3. чистый старт (migrate сам прогонит alembic upgrade head)
+# 3. чистый старт — migrate прогонит миграции сам
 sudo docker compose -f deploy/docker-compose.prod.yml down
 sudo docker compose -f deploy/docker-compose.prod.yml up -d --build
 
 # 4. проверки
 sudo docker compose -f deploy/docker-compose.prod.yml ps
-curl https://<домен>/health
+#   migrate → Exited (0); api → Up (healthy); bot/caddy/redis/postgres → Up
+sudo docker compose -f deploy/docker-compose.prod.yml logs --tail=20 bot
+#   "Run polling ..." без TelegramConflictError
+curl https://<домен>/health                         # {"status":"ok"}
 ./scripts/prod_healthcheck.sh
 ```
 
 Бэкап БД: `./scripts/backup_postgres.sh` (каталог `backups/` в `.gitignore` — не коммитить).
+
+### Прод без своего домена/VPS (например, Google Cloud Shell)
+
+Вместо Caddy можно отдать API через быстрый туннель Cloudflare и пропустить сервис `caddy`:
+
+```bash
+docker run --rm -it --network deploy_default \
+  cloudflare/cloudflared:latest tunnel --url http://api:8000
+```
+
+Выдаст `https://<random>.trycloudflare.com` → этот URL в `COURSES_BOT_API_URL` на сайте.
+Это **временное** решение: URL меняется при каждом перезапуске туннеля, аптайм не гарантирован.
+Для постоянной работы — VPS + Caddy + свой домен (вариант выше).
 
 ## Команды бота
 
