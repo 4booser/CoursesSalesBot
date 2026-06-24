@@ -1,7 +1,11 @@
+import logging
 import time
 
 import redis.asyncio as redis
 from fastapi import HTTPException, status
+from redis.exceptions import RedisError
+
+logger = logging.getLogger(__name__)
 
 
 class RedisRateLimiter:
@@ -15,9 +19,14 @@ class RedisRateLimiter:
         window = now // self.window_seconds
         redis_key = "rate-limit:" + key + ":" + str(window)
 
-        current = await self.client.incr(redis_key)
-        if current == 1:
-            await self.client.expire(redis_key, self.window_seconds + 1)
+        try:
+            current = await self.client.incr(redis_key)
+            if current == 1:
+                await self.client.expire(redis_key, self.window_seconds + 1)
+        except RedisError:
+            # Fail open: if Redis is down, don't take the whole API down with it.
+            logger.warning("Rate limiter unavailable; allowing request", exc_info=True)
+            return
 
         if current > self.limit:
             raise HTTPException(
