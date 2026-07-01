@@ -229,8 +229,11 @@ async def start_handler(message: Message, token_service: TokenService, catalog_s
         await message.answer(
             "Привіт! 🌸\n\n"
             "Це бот із відеотренуваннями. Після оплати на сайті відкрий персональне "
-            "посилання — я активую доступ, і тут зʼявляться твої тренування.",
+            "посилання — я активую доступ, і тут зʼявляться твої тренування.\n\n"
+            f"🆔 Твій ID: <code>{message.from_user.id}</code>\n"
+            "Якщо доступу немає, а він потрібен — надішли цей ID тренеру.",
             reply_markup=no_access_markup(),
+            parse_mode="HTML",
         )
         return
     text, markup = rendered

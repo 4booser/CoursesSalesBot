@@ -603,7 +603,7 @@ async def user_tier_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminStates.user_tier_id)
     await callback.message.answer(
         "Надішли Telegram ID користувача, якому треба змінити тариф.\n\n"
-        "ID — це числовий номер акаунта. Клієнт дізнається його командою /myid."
+        "ID — це числовий номер акаунта. Клієнт бачить свій ID, коли пише боту /start."
     )
     await callback.answer()
 
