@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import UserTierAccess
@@ -41,3 +41,20 @@ class TierAccessRepository:
         )
         result = await self.session.scalars(stmt)
         return list(result.all())
+
+    async def expire_active(self, telegram_id: int, now: datetime) -> int:
+        """Force-expire every active grant for a user; returns rows affected.
+
+        Revoke has no dedicated flag: gating reads ``expires_at > now``, so pulling
+        expiry back to ``now`` cuts access off immediately.
+        """
+        stmt = (
+            update(UserTierAccess)
+            .where(
+                UserTierAccess.telegram_id == telegram_id,
+                UserTierAccess.expires_at > now,
+            )
+            .values(expires_at=now)
+        )
+        result = await self.session.execute(stmt)
+        return result.rowcount or 0

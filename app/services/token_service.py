@@ -167,6 +167,62 @@ class TokenService:
             token_id=token.id,
         )
 
+    async def grant_access_manually(
+        self,
+        telegram_id: int,
+        tier: str,
+        duration_days: int | None = None,
+        granted_by_tg_id: int | None = None,
+    ) -> ActivatedAccess:
+        """Owner-issued free access: create a tier grant with no payment/token."""
+        try:
+            normalized_tier = normalize_tier(tier)
+        except ValueError as error:
+            raise InvalidTierError(str(error)) from error
+
+        resolved_duration = (
+            duration_days if duration_days and duration_days > 0 else duration_days_for_tier(normalized_tier)
+        )
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(days=resolved_duration)
+
+        await self.tier_access_repository.create(
+            telegram_id=telegram_id,
+            tier=normalized_tier,
+            expires_at=expires_at,
+            token_id=None,
+            payment_id=None,
+        )
+        await self.log_event(
+            event_type="manual_grant",
+            status="success",
+            tier=normalized_tier,
+            telegram_id=telegram_id,
+            message=f"Manual grant by admin {granted_by_tg_id}" if granted_by_tg_id else "Manual grant",
+        )
+        return ActivatedAccess(
+            telegram_id=telegram_id,
+            tier=normalized_tier,
+            expires_at=expires_at,
+            token_id=0,
+        )
+
+    async def revoke_access(self, telegram_id: int, revoked_by_tg_id: int | None = None) -> ActiveAccess | None:
+        """Cut off a user's access immediately. Returns the access that was active, or None."""
+        current = await self.get_active_access(telegram_id)
+        now = datetime.now(UTC)
+        affected = await self.tier_access_repository.expire_active(telegram_id, now)
+        if affected == 0:
+            return None
+        await self.log_event(
+            event_type="manual_revoke",
+            status="success",
+            tier=current.tier if current else None,
+            telegram_id=telegram_id,
+            message=f"Manual revoke by admin {revoked_by_tg_id}" if revoked_by_tg_id else "Manual revoke",
+        )
+        return current
+
     async def get_active_access(self, telegram_id: int) -> ActiveAccess | None:
         """Highest-rank non-expired tier for a user, or None."""
         now = datetime.now(UTC)

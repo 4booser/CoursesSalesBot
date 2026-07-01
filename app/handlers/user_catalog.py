@@ -234,7 +234,13 @@ async def help_handler(message: Message) -> None:
         "/activate TOKEN — активувати доступ вручну\n"
     )
     if message.from_user is not None and message.from_user.id in settings.admin_ids:
-        text += "\nАдмін:\n/admin — панель керування контентом"
+        text += (
+            "\nАдмін:\n"
+            "/admin — панель керування контентом\n"
+            "/grant ID ТАРИФ [ДНІ] — видати доступ вручну (без оплати)\n"
+            "/revoke ID — закрити доступ достроково\n"
+            "/access ID — перевірити доступ клієнта"
+        )
     rows = []
     support = support_button()
     if support:
