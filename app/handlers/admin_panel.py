@@ -19,6 +19,7 @@ from app.config import settings
 from app.repositories.content_group_repository import ContentGroupRepository
 from app.repositories.tier_flag_repository import TierFlagRepository
 from app.repositories.video_repository import VideoRepository
+from app.services.notifications import notify_tier_changed
 from app.services.token_service import InvalidTierError, TokenService
 from app.services.youtube_parser import (
     YoutubeCourseParser,
@@ -657,6 +658,7 @@ async def user_tier_set(callback: CallbackQuery, token_service: TokenService) ->
             f"✅ Готово.\n\nКористувач ID <code>{telegram_id}</code>: тариф <b>{tier_title(access.tier)}</b>, "
             f"діє до <b>{access.expires_at.strftime('%d.%m.%Y')}</b>."
         )
+    await notify_tier_changed(telegram_id, access.tier if access else None)
     await callback.answer("Тариф змінено")
     markup = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="⬅️ В адмін-панель", callback_data="adm:home"),

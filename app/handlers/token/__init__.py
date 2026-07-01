@@ -7,6 +7,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
 from app.services.catalog_service import CatalogService
+from app.services.notifications import notify_admins_new_access
 from app.services.token_service import ActivatedAccess, TokenService
 from app.handlers.user_catalog import render_home
 from app.tiers import tier_title
@@ -30,6 +31,14 @@ async def grant_and_show(
     )
     if message.from_user is None:
         return
+
+    await notify_admins_new_access(
+        buyer_id=message.from_user.id,
+        buyer_name=message.from_user.full_name,
+        buyer_username=message.from_user.username,
+        tier=activated.tier,
+    )
+
     rendered = await render_home(message.from_user.id, token_service, catalog_service)
     if rendered is not None:
         text, markup = rendered

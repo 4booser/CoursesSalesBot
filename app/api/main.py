@@ -13,6 +13,7 @@ from app.repositories.payment_event_repository import PaymentEventRepository
 from app.repositories.tier_access_repository import TierAccessRepository
 from app.repositories.tier_flag_repository import TierFlagRepository
 from app.repositories.token_repository import TokenRepository
+from app.services.notifications import notify_tier_changed
 from app.services.token_service import (
     CreatedToken,
     InvalidTierError,
@@ -225,6 +226,7 @@ async def set_user_tier(
         access = await service.set_tier(telegram_id=telegram_id, tier=normalized)
     except InvalidTierError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    await notify_tier_changed(telegram_id, access.tier if access else None)
     return SetUserTierResponse(
         telegram_id=telegram_id,
         tier=access.tier if access else None,
