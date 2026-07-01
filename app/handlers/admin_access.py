@@ -40,7 +40,7 @@ async def grant_command(message: Message, command: CommandObject, token_service:
             "ДНІ — необовʼязково (за замовчуванням строк тарифу).\n\n"
             "Приклад: <code>/grant 123456789 pro 30</code>\n\n"
             "ID — це номер акаунта клієнта в Telegram. Щоб його дізнатись, "
-            "попроси клієнта написати боту /start — бот покаже його ID.",
+            "попроси клієнта відкрити бота @userinfobot — той покаже його ID.",
             parse_mode="HTML",
         )
         return
