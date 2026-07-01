@@ -227,6 +227,28 @@ class UserTierAccess(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class TierFlag(Base):
+    """Per-tier admin switch. When ``is_frozen`` is true, users whose effective
+    tier is this one temporarily lose catalog access (their grant stays intact).
+    One row per tier; a missing row means "not frozen".
+    """
+
+    __tablename__ = "tier_flags"
+
+    tier: Mapped[str] = mapped_column(String(16), primary_key=True)
+    is_frozen: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class PaymentEventLog(Base):
     __tablename__ = "payment_event_logs"
 

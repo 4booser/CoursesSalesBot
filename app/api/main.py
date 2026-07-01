@@ -11,6 +11,7 @@ from app.config import settings
 from app.database.session import engine, session_maker
 from app.repositories.payment_event_repository import PaymentEventRepository
 from app.repositories.tier_access_repository import TierAccessRepository
+from app.repositories.tier_flag_repository import TierFlagRepository
 from app.repositories.token_repository import TokenRepository
 from app.services.token_service import (
     CreatedToken,
@@ -18,7 +19,7 @@ from app.services.token_service import (
     TokenAlreadyExistsError,
     TokenService,
 )
-from app.tiers import ALL_TIERS
+from app.tiers import ALL_TIERS, ASSIGNABLE_TIERS
 
 
 class CreateTokenRequest(BaseModel):
@@ -39,6 +40,30 @@ class CreateTokenResponse(BaseModel):
 class AccessCheckResponse(BaseModel):
     telegram_id: int
     has_access: bool
+    tier: str | None
+    expires_at: datetime | None
+    frozen: bool = False
+
+
+class FreezeTierRequest(BaseModel):
+    frozen: bool
+
+
+class FreezeTierResponse(BaseModel):
+    tier: str
+    frozen: bool
+
+
+class FrozenTiersResponse(BaseModel):
+    frozen: list[str]
+
+
+class SetUserTierRequest(BaseModel):
+    tier: str = Field(min_length=1, max_length=16)
+
+
+class SetUserTierResponse(BaseModel):
+    telegram_id: int
     tier: str | None
     expires_at: datetime | None
 
@@ -95,6 +120,7 @@ def build_token_service(session: AsyncSession) -> TokenService:
         token_repository=TokenRepository(session),
         tier_access_repository=TierAccessRepository(session),
         payment_event_repository=PaymentEventRepository(session),
+        tier_flag_repository=TierFlagRepository(session),
     )
 
 
@@ -146,9 +172,61 @@ async def check_access(
 ) -> AccessCheckResponse:
     service = build_token_service(session)
     access = await service.get_active_access(telegram_id)
+    frozen = await service.is_tier_frozen(access.tier) if access else False
     return AccessCheckResponse(
         telegram_id=telegram_id,
         has_access=access is not None,
+        tier=access.tier if access else None,
+        expires_at=access.expires_at if access else None,
+        frozen=frozen,
+    )
+
+
+@app.post("/api/tiers/{tier}/freeze", response_model=FreezeTierResponse, dependencies=[Depends(authorize_site)])
+async def set_tier_freeze(
+    tier: str,
+    request: FreezeTierRequest,
+    session: AsyncSession = Depends(get_session),
+) -> FreezeTierResponse:
+    normalized = tier.strip().lower()
+    if normalized not in ALL_TIERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown tier '{tier}'. Allowed tiers: {', '.join(ALL_TIERS)}",
+        )
+    await TierFlagRepository(session).set_frozen(normalized, request.frozen)
+    return FreezeTierResponse(tier=normalized, frozen=request.frozen)
+
+
+@app.get("/api/tiers/freeze", response_model=FrozenTiersResponse, dependencies=[Depends(authorize_site)])
+async def list_frozen_tiers(session: AsyncSession = Depends(get_session)) -> FrozenTiersResponse:
+    frozen = await TierFlagRepository(session).frozen_tiers()
+    return FrozenTiersResponse(frozen=sorted(frozen))
+
+
+@app.post(
+    "/api/users/{telegram_id}/tier",
+    response_model=SetUserTierResponse,
+    dependencies=[Depends(authorize_site)],
+)
+async def set_user_tier(
+    telegram_id: int,
+    request: SetUserTierRequest,
+    session: AsyncSession = Depends(get_session),
+) -> SetUserTierResponse:
+    normalized = request.tier.strip().lower()
+    if normalized not in ASSIGNABLE_TIERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown tier '{request.tier}'. Allowed: {', '.join(ASSIGNABLE_TIERS)}",
+        )
+    service = build_token_service(session)
+    try:
+        access = await service.set_tier(telegram_id=telegram_id, tier=normalized)
+    except InvalidTierError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    return SetUserTierResponse(
+        telegram_id=telegram_id,
         tier=access.tier if access else None,
         expires_at=access.expires_at if access else None,
     )

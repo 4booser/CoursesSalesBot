@@ -9,7 +9,14 @@ TIER_LITE = "lite"
 TIER_PRO = "pro"
 TIER_VIP = "vip"
 
+# Sentinel used by admin/API when *removing* a user's access ("no tier").
+# Not a real tier: never stored on a grant, rejected by ``normalize_tier``.
+TIER_NONE = "none"
+
 ALL_TIERS: list[str] = [TIER_LITE, TIER_PRO, TIER_VIP]
+
+# What an admin can assign to a user: any real tier, or "none" to revoke.
+ASSIGNABLE_TIERS: list[str] = [TIER_NONE, *ALL_TIERS]
 
 # Rank drives content gating: a user sees content with min_tier rank <= his rank.
 TIER_RANK: dict[str, int] = {
@@ -29,6 +36,7 @@ TIER_TITLES: dict[str, str] = {
     TIER_LITE: "Lite",
     TIER_PRO: "Pro",
     TIER_VIP: "VIP",
+    TIER_NONE: "Без доступу",
 }
 
 

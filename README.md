@@ -445,11 +445,50 @@ curl "http://localhost:8000/api/access/check?telegram_id=692080442" \
   "telegram_id": 692080442,
   "has_access": true,
   "tier": "pro",
-  "expires_at": "2026-07-22T10:00:00+00:00"
+  "expires_at": "2026-07-22T10:00:00+00:00",
+  "frozen": false
 }
 ```
 
-Нет доступа → `has_access: false`, `tier: null`, `expires_at: null`.
+Нет доступа → `has_access: false`, `tier: null`, `expires_at: null`, `frozen: false`.
+`frozen: true` — грант активен, но доступ к тарифу временно приостановлен админом
+(см. заморозку ниже); пользователь каталог не видит.
+
+### `POST /api/tiers/{tier}/freeze`
+
+Приостановить или вернуть доступ к тренировкам для всех пользователей тарифа.
+Грант не сгорает — при снятии заморозки доступ возвращается. `tier` — `lite` | `pro` | `vip`.
+
+```bash
+curl -X POST http://localhost:8000/api/tiers/pro/freeze \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $SITE_API_KEY" \
+  -d '{ "frozen": true }'
+```
+
+Ответ `200`: `{ "tier": "pro", "frozen": true }`. Ошибки: `400` — неизвестный тариф; `401`; `429`.
+
+### `GET /api/tiers/freeze`
+
+Список замороженных тарифов. → `{ "frozen": ["pro"] }`.
+
+### `POST /api/users/{telegram_id}/tier`
+
+Вручную выставить тариф пользователю (админ-оверрайд). Гасит текущие активные гранты и
+создаёт новый на стандартный срок тарифа (lite/pro — 30 дн, vip — 90). Работает и для
+пользователя, которого ещё нет в БД. `tier: "none"` — снять доступ.
+
+```bash
+curl -X POST http://localhost:8000/api/users/692080442/tier \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $SITE_API_KEY" \
+  -d '{ "tier": "pro" }'
+```
+
+Поле `tier` (обяз.) — `none` | `lite` | `pro` | `vip`.
+
+Ответ `200`: `{ "telegram_id": 692080442, "tier": "pro", "expires_at": "2026-07-31T20:00:00+00:00" }`.
+Для `none` → `tier: null`, `expires_at: null`. Ошибки: `400` — неизвестный тариф; `401`; `429`.
 
 ## Контракт сайт ↔ бот
 

@@ -15,8 +15,9 @@ from secrets import token_urlsafe
 
 from app.repositories.payment_event_repository import PaymentEventRepository
 from app.repositories.tier_access_repository import TierAccessRepository
+from app.repositories.tier_flag_repository import TierFlagRepository
 from app.repositories.token_repository import TokenRepository
-from app.tiers import duration_days_for_tier, normalize_tier, tier_rank
+from app.tiers import TIER_NONE, duration_days_for_tier, normalize_tier, tier_rank
 
 
 @dataclass(frozen=True)
@@ -59,10 +60,12 @@ class TokenService:
         token_repository: TokenRepository,
         tier_access_repository: TierAccessRepository,
         payment_event_repository: PaymentEventRepository | None = None,
+        tier_flag_repository: TierFlagRepository | None = None,
     ):
         self.token_repository = token_repository
         self.tier_access_repository = tier_access_repository
         self.payment_event_repository = payment_event_repository
+        self.tier_flag_repository = tier_flag_repository
 
     async def create_token(
         self,
@@ -206,6 +209,63 @@ class TokenService:
             expires_at=expires_at,
             token_id=0,
         )
+
+    async def set_tier(
+        self,
+        telegram_id: int,
+        tier: str,
+        changed_by_tg_id: int | None = None,
+    ) -> ActiveAccess | None:
+        """Admin override of a user's tier.
+
+        Wipes any current active grants, then — for a real tier — creates a single
+        fresh grant for the tier's standard duration. ``tier == "none"`` just leaves
+        the user with no active access. Works whether or not the user existed before.
+        Returns the resulting active access, or None when set to "none".
+        """
+        normalized = (tier or "").strip().lower()
+        if normalized != TIER_NONE:
+            try:
+                normalized = normalize_tier(normalized)
+            except ValueError as error:
+                raise InvalidTierError(str(error)) from error
+
+        now = datetime.now(UTC)
+        await self.tier_access_repository.expire_active(telegram_id, now)
+
+        if normalized == TIER_NONE:
+            await self.log_event(
+                event_type="tier_set",
+                status="success",
+                tier=None,
+                telegram_id=telegram_id,
+                message=f"Tier cleared by admin {changed_by_tg_id}" if changed_by_tg_id else "Tier cleared",
+            )
+            return None
+
+        duration_days = duration_days_for_tier(normalized)
+        expires_at = now + timedelta(days=duration_days)
+        await self.tier_access_repository.create(
+            telegram_id=telegram_id,
+            tier=normalized,
+            expires_at=expires_at,
+            token_id=None,
+            payment_id=None,
+        )
+        await self.log_event(
+            event_type="tier_set",
+            status="success",
+            tier=normalized,
+            telegram_id=telegram_id,
+            message=f"Tier set to {normalized} by admin {changed_by_tg_id}" if changed_by_tg_id else f"Tier set to {normalized}",
+        )
+        return ActiveAccess(tier=normalized, expires_at=expires_at)
+
+    async def is_tier_frozen(self, tier: str | None) -> bool:
+        """Whether catalog access for this tier is currently paused by the admin."""
+        if not tier or self.tier_flag_repository is None:
+            return False
+        return await self.tier_flag_repository.is_frozen(tier.strip().lower())
 
     async def revoke_access(self, telegram_id: int, revoked_by_tg_id: int | None = None) -> ActiveAccess | None:
         """Cut off a user's access immediately. Returns the access that was active, or None."""

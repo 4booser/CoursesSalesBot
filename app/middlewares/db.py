@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.repositories.content_group_repository import ContentGroupRepository
 from app.repositories.payment_event_repository import PaymentEventRepository
 from app.repositories.tier_access_repository import TierAccessRepository
+from app.repositories.tier_flag_repository import TierFlagRepository
 from app.repositories.token_repository import TokenRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.catalog_service import CatalogService
@@ -26,11 +27,13 @@ class DbMiddleware(BaseMiddleware):
         async with self.session_maker() as session:
             content_group_repository = ContentGroupRepository(session)
             video_repository = VideoRepository(session)
+            tier_flag_repository = TierFlagRepository(session)
 
             token_service = TokenService(
                 token_repository=TokenRepository(session),
                 tier_access_repository=TierAccessRepository(session),
                 payment_event_repository=PaymentEventRepository(session),
+                tier_flag_repository=tier_flag_repository,
             )
             catalog_service = CatalogService(
                 content_group_repository=content_group_repository,
@@ -42,6 +45,7 @@ class DbMiddleware(BaseMiddleware):
             data["catalog_service"] = catalog_service
             data["content_group_repository"] = content_group_repository
             data["video_repository"] = video_repository
+            data["tier_flag_repository"] = tier_flag_repository
 
             try:
                 result = await handler(event, data)

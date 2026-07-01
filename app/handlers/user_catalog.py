@@ -25,6 +25,8 @@ router = Router(name=__name__)
 logger = logging.getLogger(__name__)
 
 CATALOG_TITLE = "🎬 Мої тренування"
+FROZEN_NOTE = "⏸ Доступ до тренувань тимчасово призупинено. Ми скоро все повернемо 🌿"
+FROZEN_ALERT = "Тренування тимчасово недоступні"
 
 
 def support_button() -> list[InlineKeyboardButton]:
@@ -80,6 +82,10 @@ async def render_home(telegram_id: int, token_service: TokenService, catalog_ser
     if access is None:
         return None
 
+    if await token_service.is_tier_frozen(access.tier):
+        text = CATALOG_TITLE + "\n\n" + access_header(access) + "\n" + FROZEN_NOTE
+        return text, no_access_markup()
+
     groups = await catalog_service.visible_groups(parent_id=None, user_tier=access.tier)
     text = CATALOG_TITLE + "\n\n" + access_header(access)
     if groups:
@@ -127,6 +133,9 @@ async def open_group(callback: CallbackQuery, token_service: TokenService, catal
     if access is None:
         await callback.answer("Доступ неактивний", show_alert=True)
         return
+    if await token_service.is_tier_frozen(access.tier):
+        await callback.answer(FROZEN_ALERT, show_alert=True)
+        return
 
     group_id = int(callback.data.removeprefix("cat:grp:"))
     group = await catalog_service.get_group_if_visible(group_id, access.tier)
@@ -162,6 +171,9 @@ async def open_video(callback: CallbackQuery, token_service: TokenService, catal
     access = await require_access(callback.from_user.id, token_service)
     if access is None:
         await callback.answer("Доступ неактивний", show_alert=True)
+        return
+    if await token_service.is_tier_frozen(access.tier):
+        await callback.answer(FROZEN_ALERT, show_alert=True)
         return
 
     video_id = int(callback.data.removeprefix("cat:vid:"))
@@ -236,7 +248,7 @@ async def help_handler(message: Message) -> None:
     if message.from_user is not None and message.from_user.id in settings.admin_ids:
         text += (
             "\nАдмін:\n"
-            "/admin — панель керування контентом\n"
+            "/admin — панель: контент, тариф користувача, заморозка тарифів\n"
             "/grant ID ТАРИФ [ДНІ] — видати доступ вручну (без оплати)\n"
             "/revoke ID — закрити доступ достроково\n"
             "/access ID — перевірити доступ клієнта"
