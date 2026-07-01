@@ -55,7 +55,17 @@ def tier_picker_row(kind: str, item_id: int) -> list[InlineKeyboardButton]:
 # Home
 # ----------------------------------------------------------------------------
 
-async def render_home(content_group_repository: ContentGroupRepository) -> tuple[str, InlineKeyboardMarkup]:
+async def render_home() -> tuple[str, InlineKeyboardMarkup]:
+    rows = [
+        [InlineKeyboardButton(text="📂 Розділи каталогу", callback_data="adm:catalog")],
+        [InlineKeyboardButton(text="👤 Тариф користувача", callback_data="adm:utier:start")],
+        [InlineKeyboardButton(text="🧊 Доступ по тарифах", callback_data="adm:freeze:menu")],
+    ]
+    text = "🛠 <b>Адмін-панель</b>\n\nОбери, що робимо:"
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def render_catalog(content_group_repository: ContentGroupRepository) -> tuple[str, InlineKeyboardMarkup]:
     groups = await content_group_repository.list_children(parent_id=None, active_only=False)
     rows = [
         [InlineKeyboardButton(
@@ -65,28 +75,42 @@ async def render_home(content_group_repository: ContentGroupRepository) -> tuple
         for group in groups
     ]
     rows.append([InlineKeyboardButton(text="➕ Нова група", callback_data="adm:newgrp:root")])
-    rows.append([InlineKeyboardButton(text="👤 Тариф користувача", callback_data="adm:utier:start")])
-    rows.append([InlineKeyboardButton(text="🧊 Доступ по тарифах", callback_data="adm:freeze:menu")])
-    text = "🛠 <b>Адмін-панель</b>\n\nРозділи каталогу:" if groups else "🛠 <b>Адмін-панель</b>\n\nЩе немає жодного розділу."
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:home")])
+    text = (
+        "📂 <b>Розділи каталогу</b>\n\nОбери розділ або створи новий:"
+        if groups
+        else "📂 <b>Розділи каталогу</b>\n\nЩе немає жодного розділу."
+    )
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.message(Command("admin"))
-async def admin_command(message: Message, content_group_repository: ContentGroupRepository, state: FSMContext) -> None:
+async def admin_command(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     await state.clear()
-    text, markup = await render_home(content_group_repository)
+    text, markup = await render_home()
     await message.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "adm:home")
-async def admin_home(callback: CallbackQuery, content_group_repository: ContentGroupRepository, state: FSMContext) -> None:
+async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id if callback.from_user else None):
         await callback.answer("Немає доступу", show_alert=True)
         return
     await state.clear()
-    text, markup = await render_home(content_group_repository)
+    text, markup = await render_home()
+    await safe_edit(callback, text, markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:catalog")
+async def open_admin_catalog(callback: CallbackQuery, content_group_repository: ContentGroupRepository, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id if callback.from_user else None):
+        await callback.answer("Немає доступу", show_alert=True)
+        return
+    await state.clear()
+    text, markup = await render_catalog(content_group_repository)
     await safe_edit(callback, text, markup)
     await callback.answer()
 
@@ -128,7 +152,7 @@ async def render_group(
         InlineKeyboardButton(text="🗑 Видалити", callback_data=f"adm:del:g:{group.id}"),
     ])
     rows.append(tier_picker_row("g", group.id))
-    back = "adm:home" if group.parent_id is None else f"adm:grp:{group.parent_id}"
+    back = "adm:catalog" if group.parent_id is None else f"adm:grp:{group.parent_id}"
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back)])
 
     text = (
@@ -273,7 +297,7 @@ async def delete_group(
         await content_group_repository.delete(group)
     await callback.answer("Видалено")
     if parent_id is None:
-        text, markup = await render_home(content_group_repository)
+        text, markup = await render_catalog(content_group_repository)
         await safe_edit(callback, text, markup)
         return
     rendered = await render_group(parent_id, content_group_repository, video_repository)
@@ -281,7 +305,7 @@ async def delete_group(
         text, markup = rendered
         await safe_edit(callback, text, markup)
     else:
-        text, markup = await render_home(content_group_repository)
+        text, markup = await render_catalog(content_group_repository)
         await safe_edit(callback, text, markup)
 
 
