@@ -16,9 +16,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import settings
+from app.repositories.attachment_repository import AttachmentRepository
 from app.repositories.content_group_repository import ContentGroupRepository
 from app.repositories.tier_flag_repository import TierFlagRepository
 from app.repositories.video_repository import VideoRepository
+from app.services.attachments import extract_file, human_size, media_icon
 from app.services.notifications import notify_tier_changed
 from app.services.token_service import InvalidTierError, TokenService
 from app.services.youtube_parser import (
@@ -37,6 +39,8 @@ class AdminStates(StatesGroup):
     group_rename = State()   # data: group_id
     video_link = State()     # data: group_id
     video_rename = State()   # data: video_id
+    attachment_upload = State()  # data: parent_kind ('g'|'v'), parent_id
+    attachment_rename = State()  # data: attachment_id
     user_tier_id = State()   # waiting for the Telegram id to set a tier for
 
 
@@ -45,7 +49,7 @@ def is_admin(user_id: int | None) -> bool:
 
 
 def tier_picker_row(kind: str, item_id: int) -> list[InlineKeyboardButton]:
-    # kind: "g" (group) | "v" (video)
+    # kind: "g" (group) | "v" (video) | "f" (file/attachment)
     return [
         InlineKeyboardButton(text=tier_title(tier), callback_data=f"adm:settier:{kind}:{item_id}:{tier}")
         for tier in ALL_TIERS
@@ -124,6 +128,7 @@ async def render_group(
     group_id: int,
     content_group_repository: ContentGroupRepository,
     video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
 ) -> tuple[str, InlineKeyboardMarkup] | None:
     group = await content_group_repository.get_by_id(group_id)
     if group is None:
@@ -131,6 +136,7 @@ async def render_group(
 
     subgroups = await content_group_repository.list_children(parent_id=group.id, active_only=False)
     videos = await video_repository.list_by_group(group.id, active_only=False)
+    files = await attachment_repository.list_by_group(group.id, active_only=False)
 
     rows: list[list[InlineKeyboardButton]] = []
     for sub in subgroups:
@@ -143,11 +149,17 @@ async def render_group(
             text=f"▶️ {video.title} · {tier_title(video.min_tier)}",
             callback_data=f"adm:vid:{video.id}",
         )])
+    for file in files:
+        rows.append([InlineKeyboardButton(
+            text=f"{media_icon(file.media_type)} {file.title} · {tier_title(file.min_tier)}",
+            callback_data=f"adm:att:{file.id}",
+        )])
 
     rows.append([
         InlineKeyboardButton(text="➕ Підгрупа", callback_data=f"adm:newgrp:{group.id}"),
         InlineKeyboardButton(text="➕ Відео", callback_data=f"adm:newvid:{group.id}"),
     ])
+    rows.append([InlineKeyboardButton(text="➕ Файл", callback_data=f"adm:newatt:g:{group.id}")])
     rows.append([
         InlineKeyboardButton(text="✏️ Назва", callback_data=f"adm:ren:g:{group.id}"),
         InlineKeyboardButton(text="🗑 Видалити", callback_data=f"adm:del:g:{group.id}"),
@@ -159,7 +171,7 @@ async def render_group(
     text = (
         f"📁 <b>{group.title}</b>\n"
         f"Мінімальний тариф: <b>{tier_title(group.min_tier)}</b>\n\n"
-        f"Підгруп: {len(subgroups)} · Відео: {len(videos)}\n\n"
+        f"Підгруп: {len(subgroups)} · Відео: {len(videos)} · Файлів: {len(files)}\n\n"
         "Тариф нижче — мінімальний рівень, з якого видно цей розділ."
     )
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
@@ -170,6 +182,7 @@ async def open_admin_group(
     callback: CallbackQuery,
     content_group_repository: ContentGroupRepository,
     video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
     state: FSMContext,
 ) -> None:
     if not is_admin(callback.from_user.id if callback.from_user else None):
@@ -177,7 +190,7 @@ async def open_admin_group(
         return
     await state.clear()
     group_id = int(callback.data.removeprefix("adm:grp:"))
-    rendered = await render_group(group_id, content_group_repository, video_repository)
+    rendered = await render_group(group_id, content_group_repository, video_repository, attachment_repository)
     if rendered is None:
         await callback.answer("Розділ не знайдено", show_alert=True)
         return
@@ -206,6 +219,7 @@ async def new_group_finish(
     state: FSMContext,
     content_group_repository: ContentGroupRepository,
     video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
 ) -> None:
     title = (message.text or "").strip()
     if not title:
@@ -223,7 +237,7 @@ async def new_group_finish(
     group = await content_group_repository.create(title=title[:128], parent_id=parent_id, min_tier=min_tier)
     await state.clear()
 
-    rendered = await render_group(group.id, content_group_repository, video_repository)
+    rendered = await render_group(group.id, content_group_repository, video_repository, attachment_repository)
     if rendered is not None:
         text, markup = rendered
         await message.answer("✅ Створено.", )
@@ -248,6 +262,7 @@ async def rename_group_finish(
     state: FSMContext,
     content_group_repository: ContentGroupRepository,
     video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
 ) -> None:
     title = (message.text or "").strip()
     if not title:
@@ -262,7 +277,7 @@ async def rename_group_finish(
         return
     await content_group_repository.update(group, title=title[:128])
     await state.clear()
-    rendered = await render_group(group_id, content_group_repository, video_repository)
+    rendered = await render_group(group_id, content_group_repository, video_repository, attachment_repository)
     if rendered is not None:
         text, markup = rendered
         await message.answer(text, reply_markup=markup, parse_mode="HTML")
@@ -287,6 +302,7 @@ async def delete_group(
     callback: CallbackQuery,
     content_group_repository: ContentGroupRepository,
     video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
 ) -> None:
     if not is_admin(callback.from_user.id if callback.from_user else None):
         await callback.answer("Немає доступу", show_alert=True)
@@ -301,7 +317,7 @@ async def delete_group(
         text, markup = await render_catalog(content_group_repository)
         await safe_edit(callback, text, markup)
         return
-    rendered = await render_group(parent_id, content_group_repository, video_repository)
+    rendered = await render_group(parent_id, content_group_repository, video_repository, attachment_repository)
     if rendered is not None:
         text, markup = rendered
         await safe_edit(callback, text, markup)
@@ -314,35 +330,51 @@ async def delete_group(
 # Video management
 # ----------------------------------------------------------------------------
 
-async def render_video(video_id: int, video_repository: VideoRepository) -> tuple[str, InlineKeyboardMarkup] | None:
+async def render_video(
+    video_id: int,
+    video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
+) -> tuple[str, InlineKeyboardMarkup] | None:
     video = await video_repository.get_by_id(video_id)
     if video is None:
         return None
-    rows = [
-        [
-            InlineKeyboardButton(text="✏️ Назва", callback_data=f"adm:ren:v:{video.id}"),
-            InlineKeyboardButton(text="🗑 Видалити", callback_data=f"adm:del:v:{video.id}"),
-        ],
-        tier_picker_row("v", video.id),
-        [InlineKeyboardButton(text="⬅️ До групи", callback_data=f"adm:grp:{video.group_id}")],
-    ]
+    files = await attachment_repository.list_by_video(video.id, active_only=False)
+    rows: list[list[InlineKeyboardButton]] = []
+    for file in files:
+        rows.append([InlineKeyboardButton(
+            text=f"{media_icon(file.media_type)} {file.title} · {tier_title(file.min_tier)}",
+            callback_data=f"adm:att:{file.id}",
+        )])
+    rows.append([InlineKeyboardButton(text="➕ Файл", callback_data=f"adm:newatt:v:{video.id}")])
+    rows.append([
+        InlineKeyboardButton(text="✏️ Назва", callback_data=f"adm:ren:v:{video.id}"),
+        InlineKeyboardButton(text="🗑 Видалити", callback_data=f"adm:del:v:{video.id}"),
+    ])
+    rows.append(tier_picker_row("v", video.id))
+    rows.append([InlineKeyboardButton(text="⬅️ До групи", callback_data=f"adm:grp:{video.group_id}")])
     text = (
         f"▶️ <b>{video.title}</b>\n"
         f"Мінімальний тариф: <b>{tier_title(video.min_tier)}</b>\n"
         f"Посилання: {video.youtube_url}\n"
-        f"Обкладинка: {'є' if video.thumbnail_url else 'немає'}"
+        f"Обкладинка: {'є' if video.thumbnail_url else 'немає'}\n"
+        f"Файлів: {len(files)}"
     )
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.callback_query(F.data.startswith("adm:vid:"))
-async def open_admin_video(callback: CallbackQuery, video_repository: VideoRepository, state: FSMContext) -> None:
+async def open_admin_video(
+    callback: CallbackQuery,
+    video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
+    state: FSMContext,
+) -> None:
     if not is_admin(callback.from_user.id if callback.from_user else None):
         await callback.answer("Немає доступу", show_alert=True)
         return
     await state.clear()
     video_id = int(callback.data.removeprefix("adm:vid:"))
-    rendered = await render_video(video_id, video_repository)
+    rendered = await render_video(video_id, video_repository, attachment_repository)
     if rendered is None:
         await callback.answer("Відео не знайдено", show_alert=True)
         return
@@ -372,6 +404,7 @@ async def new_video_finish(
     state: FSMContext,
     content_group_repository: ContentGroupRepository,
     video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
 ) -> None:
     text = (message.text or message.caption or "").strip()
     data = await state.get_data()
@@ -409,7 +442,7 @@ async def new_video_finish(
     )
     await state.clear()
     await status.edit_text("✅ Відео додано.")
-    rendered = await render_video(video.id, video_repository)
+    rendered = await render_video(video.id, video_repository, attachment_repository)
     if rendered is not None:
         vtext, markup = rendered
         await message.answer(vtext, reply_markup=markup, parse_mode="HTML")
@@ -428,7 +461,12 @@ async def rename_video_start(callback: CallbackQuery, state: FSMContext) -> None
 
 
 @router.message(AdminStates.video_rename)
-async def rename_video_finish(message: Message, state: FSMContext, video_repository: VideoRepository) -> None:
+async def rename_video_finish(
+    message: Message,
+    state: FSMContext,
+    video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
+) -> None:
     title = (message.text or "").strip()
     if not title:
         await message.answer("Назва порожня. Спробуй ще раз.")
@@ -442,7 +480,7 @@ async def rename_video_finish(message: Message, state: FSMContext, video_reposit
         return
     await video_repository.update(video, title=title[:128])
     await state.clear()
-    rendered = await render_video(video_id, video_repository)
+    rendered = await render_video(video_id, video_repository, attachment_repository)
     if rendered is not None:
         text, markup = rendered
         await message.answer(text, reply_markup=markup, parse_mode="HTML")
@@ -467,6 +505,7 @@ async def delete_video(
     callback: CallbackQuery,
     video_repository: VideoRepository,
     content_group_repository: ContentGroupRepository,
+    attachment_repository: AttachmentRepository,
 ) -> None:
     if not is_admin(callback.from_user.id if callback.from_user else None):
         await callback.answer("Немає доступу", show_alert=True)
@@ -478,14 +517,214 @@ async def delete_video(
         await video_repository.delete(video)
     await callback.answer("Видалено")
     if group_id is not None:
-        rendered = await render_group(group_id, content_group_repository, video_repository)
+        rendered = await render_group(group_id, content_group_repository, video_repository, attachment_repository)
         if rendered is not None:
             text, markup = rendered
             await safe_edit(callback, text, markup)
 
 
 # ----------------------------------------------------------------------------
-# Tier selection (groups + videos)
+# Attachment (file) management
+# ----------------------------------------------------------------------------
+
+async def render_attachment(
+    attachment_id: int,
+    attachment_repository: AttachmentRepository,
+) -> tuple[str, InlineKeyboardMarkup] | None:
+    attachment = await attachment_repository.get_by_id(attachment_id)
+    if attachment is None:
+        return None
+    if attachment.group_id is not None:
+        back = InlineKeyboardButton(text="⬅️ До групи", callback_data=f"adm:grp:{attachment.group_id}")
+    else:
+        back = InlineKeyboardButton(text="⬅️ До відео", callback_data=f"adm:vid:{attachment.video_id}")
+    rows = [
+        [
+            InlineKeyboardButton(text="✏️ Назва", callback_data=f"adm:ren:f:{attachment.id}"),
+            InlineKeyboardButton(text="🗑 Видалити", callback_data=f"adm:del:f:{attachment.id}"),
+        ],
+        tier_picker_row("f", attachment.id),
+        [back],
+    ]
+    text = (
+        f"{media_icon(attachment.media_type)} <b>{attachment.title}</b>\n"
+        f"Мінімальний тариф: <b>{tier_title(attachment.min_tier)}</b>\n"
+        f"Тип: {attachment.media_type}\n"
+        f"Файл: {attachment.file_name or '—'}\n"
+        f"Розмір: {human_size(attachment.file_size)}"
+    )
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("adm:att:"))
+async def open_admin_attachment(
+    callback: CallbackQuery,
+    attachment_repository: AttachmentRepository,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id if callback.from_user else None):
+        await callback.answer("Немає доступу", show_alert=True)
+        return
+    await state.clear()
+    attachment_id = int(callback.data.removeprefix("adm:att:"))
+    rendered = await render_attachment(attachment_id, attachment_repository)
+    if rendered is None:
+        await callback.answer("Файл не знайдено", show_alert=True)
+        return
+    text, markup = rendered
+    await safe_edit(callback, text, markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:newatt:"))
+async def new_attachment_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id if callback.from_user else None):
+        await callback.answer("Немає доступу", show_alert=True)
+        return
+    # adm:newatt:<kind>:<id>, kind: g (group) | v (video)
+    _, _, kind, raw_id = callback.data.split(":")
+    await state.set_state(AdminStates.attachment_upload)
+    await state.update_data(parent_kind=kind, parent_id=int(raw_id))
+    await callback.message.answer(
+        "Надішли файл (документ, фото, відео, аудіо, голосове чи GIF).\n"
+        "Якщо додаси підпис — він стане назвою файлу."
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.attachment_upload)
+async def new_attachment_finish(
+    message: Message,
+    state: FSMContext,
+    content_group_repository: ContentGroupRepository,
+    video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
+) -> None:
+    extracted = extract_file(message)
+    if extracted is None:
+        await message.answer("Це не файл. Надішли документ/фото/відео/аудіо як вкладення.")
+        return
+
+    data = await state.get_data()
+    kind = data["parent_kind"]
+    parent_id = int(data["parent_id"])
+
+    if kind == "g":
+        group = await content_group_repository.get_by_id(parent_id)
+        if group is None:
+            await state.clear()
+            await message.answer("Розділ не знайдено.")
+            return
+        group_id, video_id, min_tier = parent_id, None, group.min_tier
+    else:
+        video = await video_repository.get_by_id(parent_id)
+        if video is None:
+            await state.clear()
+            await message.answer("Відео не знайдено.")
+            return
+        group_id, video_id, min_tier = None, parent_id, video.min_tier
+
+    attachment = await attachment_repository.create(
+        group_id=group_id,
+        video_id=video_id,
+        title=extracted.title,
+        media_type=extracted.media_type,
+        file_id=extracted.file_id,
+        file_unique_id=extracted.file_unique_id,
+        file_name=extracted.file_name,
+        mime_type=extracted.mime_type,
+        file_size=extracted.file_size,
+        min_tier=min_tier,
+    )
+    await state.clear()
+    await message.answer("✅ Файл додано.")
+    rendered = await render_attachment(attachment.id, attachment_repository)
+    if rendered is not None:
+        text, markup = rendered
+        await message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("adm:ren:f:"))
+async def rename_attachment_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id if callback.from_user else None):
+        await callback.answer("Немає доступу", show_alert=True)
+        return
+    attachment_id = int(callback.data.removeprefix("adm:ren:f:"))
+    await state.set_state(AdminStates.attachment_rename)
+    await state.update_data(attachment_id=attachment_id)
+    await callback.message.answer("Надішли нову назву файлу:")
+    await callback.answer()
+
+
+@router.message(AdminStates.attachment_rename)
+async def rename_attachment_finish(
+    message: Message,
+    state: FSMContext,
+    attachment_repository: AttachmentRepository,
+) -> None:
+    title = (message.text or "").strip()
+    if not title:
+        await message.answer("Назва порожня. Спробуй ще раз.")
+        return
+    data = await state.get_data()
+    attachment_id = int(data["attachment_id"])
+    attachment = await attachment_repository.get_by_id(attachment_id)
+    if attachment is None:
+        await state.clear()
+        await message.answer("Файл не знайдено.")
+        return
+    await attachment_repository.update(attachment, title=title[:256])
+    await state.clear()
+    rendered = await render_attachment(attachment_id, attachment_repository)
+    if rendered is not None:
+        text, markup = rendered
+        await message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("adm:del:f:"))
+async def delete_attachment_confirm(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id if callback.from_user else None):
+        await callback.answer("Немає доступу", show_alert=True)
+        return
+    attachment_id = int(callback.data.removeprefix("adm:del:f:"))
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Так, видалити", callback_data=f"adm:delyes:f:{attachment_id}"),
+        InlineKeyboardButton(text="↩️ Скасувати", callback_data=f"adm:att:{attachment_id}"),
+    ]])
+    await safe_edit(callback, "🗑 Видалити цей файл?", markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:delyes:f:"))
+async def delete_attachment(
+    callback: CallbackQuery,
+    content_group_repository: ContentGroupRepository,
+    video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
+) -> None:
+    if not is_admin(callback.from_user.id if callback.from_user else None):
+        await callback.answer("Немає доступу", show_alert=True)
+        return
+    attachment_id = int(callback.data.removeprefix("adm:delyes:f:"))
+    attachment = await attachment_repository.get_by_id(attachment_id)
+    group_id = attachment.group_id if attachment else None
+    video_id = attachment.video_id if attachment else None
+    if attachment is not None:
+        await attachment_repository.delete(attachment)
+    await callback.answer("Видалено")
+    if group_id is not None:
+        rendered = await render_group(group_id, content_group_repository, video_repository, attachment_repository)
+    elif video_id is not None:
+        rendered = await render_video(video_id, video_repository, attachment_repository)
+    else:
+        rendered = None
+    if rendered is not None:
+        text, markup = rendered
+        await safe_edit(callback, text, markup)
+
+
+# ----------------------------------------------------------------------------
+# Tier selection (groups + videos + files)
 # ----------------------------------------------------------------------------
 
 @router.callback_query(F.data.startswith("adm:settier:"))
@@ -493,6 +732,7 @@ async def set_tier(
     callback: CallbackQuery,
     content_group_repository: ContentGroupRepository,
     video_repository: VideoRepository,
+    attachment_repository: AttachmentRepository,
 ) -> None:
     if not is_admin(callback.from_user.id if callback.from_user else None):
         await callback.answer("Немає доступу", show_alert=True)
@@ -512,14 +752,21 @@ async def set_tier(
             await callback.answer("Розділ не знайдено", show_alert=True)
             return
         await content_group_repository.update(group, min_tier=tier)
-        rendered = await render_group(item_id, content_group_repository, video_repository)
+        rendered = await render_group(item_id, content_group_repository, video_repository, attachment_repository)
+    elif kind == "f":
+        attachment = await attachment_repository.get_by_id(item_id)
+        if attachment is None:
+            await callback.answer("Файл не знайдено", show_alert=True)
+            return
+        await attachment_repository.update(attachment, min_tier=tier)
+        rendered = await render_attachment(item_id, attachment_repository)
     else:
         video = await video_repository.get_by_id(item_id)
         if video is None:
             await callback.answer("Відео не знайдено", show_alert=True)
             return
         await video_repository.update(video, min_tier=tier)
-        rendered = await render_video(item_id, video_repository)
+        rendered = await render_video(item_id, video_repository, attachment_repository)
 
     await callback.answer(f"Тариф: {tier_title(tier)}")
     if rendered is not None:

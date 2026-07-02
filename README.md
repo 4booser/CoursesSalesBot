@@ -61,6 +61,7 @@ Opaque-токен: внутри него нет тарифа или id. В БД 
 | `access_tokens` | Одноразовые токены покупки: `token_hash`, `token_preview`, `tier`, `duration_days`, `payment_id` (уникальный — защита от дублей вебхука), `is_used`, `used_by_tg_id`, `used_at`. |
 | `content_groups` | Группы и подгруппы: `parent_id` (NULL = группа верхнего уровня, иначе подгруппа), `title`, `min_tier`, `position`, `is_active`. Каскадное удаление детей. |
 | `videos` | Видео внутри группы: `group_id`, `title`, `youtube_url`, `thumbnail_url`, `min_tier`, `position`, `is_active`. |
+| `attachments` | Файлы, прикреплённые к группе **или** к видео (ровно один родитель — check-constraint `group_id XOR video_id`). Хранятся по Telegram `file_id`: `media_type` (document/photo/video/audio/voice/animation), `file_id`, `file_unique_id`, `file_name`, `mime_type`, `file_size`, `title`, `min_tier`, `position`, `is_active`. Каскадное удаление вместе с родителем. Тир-гейтинг как у видео. |
 | `user_tier_accesses` | Выданные доступы: `telegram_id`, `tier`, `expires_at`, `token_id`, `payment_id`. У юзера может быть несколько записей (докупки) — действует высший непросроченный тариф. |
 | `payment_event_logs` | Аудит: `event_type` (`token_create`/`token_activate`), `status` (`success`/`duplicate_payment`/…), `payment_id`, `telegram_id`, `token_id`, `message`. |
 
@@ -86,25 +87,27 @@ app/
 │   ├── tier_access_repository.py      # ⭐ user_tier_accesses
 │   ├── content_group_repository.py    # ⭐ content_groups (CRUD + позиции)
 │   ├── video_repository.py            # ⭐ videos (CRUD + позиции)
+│   ├── attachment_repository.py       # ⭐ attachments (файлы к группе/видео)
 │   ├── payment_event_repository.py    # ⭐ payment_event_logs
 │   └── *_repository.py (course/access/token_course/user) # легаси, не используются
 ├── services/                 # бизнес-логика
 │   ├── token_service.py      # ⭐ создание/активация токена, расчёт доступа
 │   ├── catalog_service.py    # ⭐ выборки каталога с тир-гейтингом
 │   ├── youtube_parser.py     # ⭐ yt-dlp: вытащить title + обложку из ссылки
+│   ├── attachments.py        # ⭐ разбор загруженного файла + отправка по file_id
 │   ├── payment_service.py    # легаси
 │   └── user_service.py       # легаси
 ├── handlers/                 # роутеры aiogram
 │   ├── __init__.py           # порядок роутеров
 │   ├── token/__init__.py     # ⭐ активация: /start TOKEN, /activate TOKEN
-│   ├── user_catalog.py       # ⭐ витрина: /start, /catalog, /myaccess, /help, callbacks cat:*
-│   ├── admin_panel.py        # ⭐ админка: /admin + FSM + callbacks adm:*
+│   ├── user_catalog.py       # ⭐ витрина: /start, /catalog, /myaccess, /help, callbacks cat:* (+ cat:att:* файлы)
+│   ├── admin_panel.py        # ⭐ админка: /admin + FSM + callbacks adm:* (группы/видео/файлы)
 │   └── course_parser.py      # легаси (отключён, мешал бы FSM)
 └── api/
     ├── main.py               # ⭐ FastAPI приложение и все эндпоинты
     ├── limiter.py            # ⭐ Redis fixed-window rate limiter
     └── link_cache.py         # легаси (не подключён)
-migrations/versions/          # Alembic: 0001..0004
+migrations/versions/          # Alembic: 0001..0006
 ```
 
 (⭐ — активный модуль текущей тарифной модели; «легаси» — наследие старой course-модели,
@@ -132,7 +135,8 @@ migrations/versions/          # Alembic: 0001..0004
 ### `app/middlewares/db.py` (ключевой)
 
 aiogram-мидлварь на уровне апдейта. На каждый апдейт: открывает сессию, создаёт
-`TokenService`, `CatalogService`, `ContentGroupRepository`, `VideoRepository`, кладёт их в
+`TokenService`, `CatalogService`, `ContentGroupRepository`, `VideoRepository`,
+`AttachmentRepository`, кладёт их в
 `data` (откуда aiogram инъектит в хендлеры по имени аргумента), затем `commit` при успехе
 или `rollback` при исключении. FSM-состояние админки хранится в `MemoryStorage` (по умолчанию
 в `Dispatcher`).
@@ -149,6 +153,8 @@ aiogram-мидлварь на уровне апдейта. На каждый а�
   `delete`, `next_position`, `count_videos`.
 - `VideoRepository` — `get_by_id`, `list_by_group`, `create`, `update`, `delete`,
   `next_position`.
+- `AttachmentRepository` — `get_by_id`, `list_by_group`, `list_by_video`, `create`,
+  `update`, `delete`, `next_position`. Файл цепляется к группе или к видео (xor).
 - `PaymentEventRepository` — `create` (запись в аудит-лог).
 
 ### `app/services/` (активные)
@@ -163,8 +169,12 @@ aiogram-мидлварь на уровне апдейта. На каждый а�
   - `get_active_access(telegram_id)` — высший по рангу непросроченный тариф (`ActiveAccess`)
     или `None`.
 - **`CatalogService`** — read-model с гейтингом: `visible_groups(parent_id, tier)`,
-  `visible_videos(group_id, tier)`, `get_group_if_visible`, `get_video_if_visible`
+  `visible_videos(group_id, tier)`, `visible_group_attachments`, `visible_video_attachments`,
+  `get_group_if_visible`, `get_video_if_visible`, `get_attachment_if_visible`
   (фильтр по `tier_rank(item.min_tier) <= tier_rank(user)`).
+- **`attachments`** (модуль) — `extract_file(message)` вытаскивает файл (document/photo/
+  video/audio/voice/animation) из апдейта в `ExtractedFile`; `send_attachment` доставляет его
+  юзеру нужным `answer_*` по `media_type`; `media_icon`/`human_size` — для UI.
 - **`YoutubeCourseParser`** — `parse(text)`: находит YouTube-ссылку, через yt-dlp вытаскивает
   `title`, `description`, лучшую `thumbnail`. Работает для public/unlisted; для private нужен
   `YOUTUBE_COOKIES_FILE`.

@@ -17,6 +17,7 @@ from aiogram.types import (
 )
 
 from app.config import settings
+from app.services.attachments import media_icon, send_attachment
 from app.services.catalog_service import CatalogService
 from app.services.token_service import ActiveAccess, TokenService
 from app.tiers import tier_title
@@ -145,18 +146,24 @@ async def open_group(callback: CallbackQuery, token_service: TokenService, catal
 
     subgroups = await catalog_service.visible_groups(parent_id=group.id, user_tier=access.tier)
     videos = await catalog_service.visible_videos(group_id=group.id, user_tier=access.tier)
+    files = await catalog_service.visible_group_attachments(group_id=group.id, user_tier=access.tier)
 
     rows: list[list[InlineKeyboardButton]] = []
     for sub in subgroups:
         rows.append([InlineKeyboardButton(text=f"📁 {sub.title}", callback_data=f"cat:grp:{sub.id}")])
     for video in videos:
         rows.append([InlineKeyboardButton(text=f"▶️ {video.title}", callback_data=f"cat:vid:{video.id}")])
+    for file in files:
+        rows.append([InlineKeyboardButton(
+            text=f"{media_icon(file.media_type)} {file.title}",
+            callback_data=f"cat:att:{file.id}",
+        )])
 
     back = "cat:home" if group.parent_id is None else f"cat:grp:{group.parent_id}"
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back)])
 
     text = f"📁 <b>{group.title}</b>\n\n" + access_header(access)
-    if not subgroups and not videos:
+    if not subgroups and not videos and not files:
         text += "\nТут поки порожньо."
     await edit_or_send(callback, text, InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
@@ -182,9 +189,15 @@ async def open_video(callback: CallbackQuery, token_service: TokenService, catal
         await callback.answer("Відео недоступне", show_alert=True)
         return
 
-    watch_row = [InlineKeyboardButton(text="▶️ Дивитись", url=video.youtube_url)]
-    back_row = [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cat:grp:{video.group_id}")]
-    markup = InlineKeyboardMarkup(inline_keyboard=[watch_row, back_row])
+    files = await catalog_service.visible_video_attachments(video_id=video.id, user_tier=access.tier)
+    rows = [[InlineKeyboardButton(text="▶️ Дивитись", url=video.youtube_url)]]
+    for file in files:
+        rows.append([InlineKeyboardButton(
+            text=f"{media_icon(file.media_type)} {file.title}",
+            callback_data=f"cat:att:{file.id}",
+        )])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cat:grp:{video.group_id}")])
+    markup = InlineKeyboardMarkup(inline_keyboard=rows)
 
     caption = f"▶️ <b>{video.title}</b>"
     if video.thumbnail_url:
@@ -201,6 +214,35 @@ async def open_video(callback: CallbackQuery, token_service: TokenService, catal
             logger.warning("Failed to send thumbnail for video_id=%s", video.id)
 
     await callback.message.answer(caption, reply_markup=markup, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cat:att:"))
+async def open_attachment(callback: CallbackQuery, token_service: TokenService, catalog_service: CatalogService) -> None:
+    if callback.from_user is None or callback.message is None:
+        await callback.answer()
+        return
+
+    access = await require_access(callback.from_user.id, token_service)
+    if access is None:
+        await callback.answer("Доступ неактивний", show_alert=True)
+        return
+    if await token_service.is_tier_frozen(access.tier):
+        await callback.answer(FROZEN_ALERT, show_alert=True)
+        return
+
+    attachment_id = int(callback.data.removeprefix("cat:att:"))
+    attachment = await catalog_service.get_attachment_if_visible(attachment_id, access.tier)
+    if attachment is None:
+        await callback.answer("Файл недоступний", show_alert=True)
+        return
+
+    try:
+        await send_attachment(callback.message, attachment, caption=f"{media_icon(attachment.media_type)} <b>{attachment.title}</b>")
+    except Exception:
+        logger.warning("Failed to send attachment id=%s", attachment.id)
+        await callback.answer("Не вдалося надіслати файл", show_alert=True)
+        return
     await callback.answer()
 
 

@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -173,6 +174,11 @@ class ContentGroup(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    attachments: Mapped[list["Attachment"]] = relationship(
+        foreign_keys="Attachment.group_id",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class Video(Base):
@@ -200,6 +206,60 @@ class Video(Base):
     )
 
     group: Mapped["ContentGroup"] = relationship(back_populates="videos")
+    attachments: Mapped[list["Attachment"]] = relationship(
+        foreign_keys="Attachment.video_id",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class Attachment(Base):
+    """A file attached to a group or a video, delivered by Telegram ``file_id``.
+
+    The owner uploads any file in the admin panel; the bot stores the Telegram
+    ``file_id`` (persistent for this bot) plus its metadata, and later resends it
+    to the user by that id — no external storage needed. Each attachment belongs
+    to exactly one parent: either a ``ContentGroup`` (``group_id``) or a ``Video``
+    (``video_id``), enforced by a check constraint. Tier-gated like videos.
+    """
+
+    __tablename__ = "attachments"
+    __table_args__ = (
+        CheckConstraint(
+            "(group_id IS NOT NULL) <> (video_id IS NOT NULL)",
+            name="ck_attachment_single_parent",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("content_groups.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    video_id: Mapped[int | None] = mapped_column(
+        ForeignKey("videos.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    # One of: document | photo | video | audio | voice | animation.
+    # Determines which Telegram send_* method delivers the file.
+    media_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    file_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_unique_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    file_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Minimum tier required to download this file (lite|pro|vip).
+    min_tier: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'lite'"))
+    position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
 
 
 class UserTierAccess(Base):

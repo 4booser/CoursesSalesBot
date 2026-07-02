@@ -4,6 +4,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.repositories.attachment_repository import AttachmentRepository
 from app.repositories.content_group_repository import ContentGroupRepository
 from app.repositories.payment_event_repository import PaymentEventRepository
 from app.repositories.tier_access_repository import TierAccessRepository
@@ -27,6 +28,7 @@ class DbMiddleware(BaseMiddleware):
         async with self.session_maker() as session:
             content_group_repository = ContentGroupRepository(session)
             video_repository = VideoRepository(session)
+            attachment_repository = AttachmentRepository(session)
             tier_flag_repository = TierFlagRepository(session)
 
             token_service = TokenService(
@@ -38,6 +40,7 @@ class DbMiddleware(BaseMiddleware):
             catalog_service = CatalogService(
                 content_group_repository=content_group_repository,
                 video_repository=video_repository,
+                attachment_repository=attachment_repository,
             )
 
             data["session"] = session
@@ -45,6 +48,7 @@ class DbMiddleware(BaseMiddleware):
             data["catalog_service"] = catalog_service
             data["content_group_repository"] = content_group_repository
             data["video_repository"] = video_repository
+            data["attachment_repository"] = attachment_repository
             data["tier_flag_repository"] = tier_flag_repository
 
             try:
